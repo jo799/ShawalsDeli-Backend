@@ -34,8 +34,17 @@ const PORT = process.env.PORT || 5000;
 
 // Security
 app.use(helmet());
+// .replace(/\/$/, '') strips a trailing slash if present — browsers match
+// Access-Control-Allow-Origin against the request's Origin header with
+// exact string equality, so 'https://example.com/' and 'https://example.com'
+// are treated as genuinely different origins and the request gets silently
+// blocked, even though they're obviously "the same" domain to a human. A
+// trailing slash on FRONTEND_URL is an extremely easy thing to type by
+// habit (many people add one automatically), so this normalizes it instead
+// of relying on it being entered exactly right.
+const FRONTEND_ORIGIN = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: FRONTEND_ORIGIN,
   credentials: true,
 }));
 

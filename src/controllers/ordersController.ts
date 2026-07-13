@@ -704,11 +704,11 @@ const processRefund = async (
     const isFullRefund = newAmountPaid <= 0.01;
 
     // Reverse loyalty points proportional to the refunded amount (same 1 point
-    // per KES 10 rule the payment path awards), never dropping a balance below
+    // per KES 100 rule the payment path awards), never dropping a balance below
     // zero.
     let pointsReversed = 0;
     if (order.customer_id) {
-      const pts = Math.floor(Math.round(requested * 100) / 1000);
+      const pts = Math.floor(Math.round(requested * 100) / 10000);
       if (pts > 0) {
         const lp = await client.query('SELECT available_points, total_points FROM loyalty_points WHERE customer_id = $1 FOR UPDATE', [order.customer_id]);
         if (lp.rows.length > 0) {

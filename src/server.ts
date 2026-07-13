@@ -33,7 +33,19 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Security
-app.use(helmet());
+// helmet's default Cross-Origin-Resource-Policy is 'same-origin' — a good
+// default when a single app serves everything from one place, but this one
+// deliberately doesn't: the frontend and backend are separate Railway
+// services on separate origins, and the frontend needs to display images
+// (menu photos, receipts) that only the backend serves from /uploads.
+// Without this override, the browser blocks those images from rendering
+// even though the request itself succeeds (a 200 that still won't display
+// — the request 'worked', the browser just refuses to use the response).
+// 'cross-origin' is the right choice specifically because /uploads only
+// ever holds public-facing images with nothing confidential in them.
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
 // .replace(/\/$/, '') strips a trailing slash if present — browsers match
 // Access-Control-Allow-Origin against the request's Origin header with
 // exact string equality, so 'https://example.com/' and 'https://example.com'

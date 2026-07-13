@@ -13,7 +13,12 @@ export const getMenuItems = async (req: Request, res: Response): Promise<void> =
 
     if (category_id) { conditions.push(`m.category_id = $${idx++}`); params.push(category_id); }
     if (status && status !== 'all') {
-      conditions.push(`m.status = $${idx++}`); params.push(status);
+      const statuses = String(status).split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        conditions.push(`m.status = $${idx++}`); params.push(statuses[0]);
+      } else {
+        conditions.push(`m.status = ANY($${idx++})`); params.push(statuses);
+      }
     } else if (!status) {
       // Default listing (no status param at all) hides archived items — this
       // is what the Menu admin grid and the POS both rely on. Deleting an

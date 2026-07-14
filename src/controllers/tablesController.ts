@@ -140,6 +140,46 @@ export const deleteTable = async (req: AuthRequest, res: Response): Promise<void
   }
 };
 
+const OPEN_ORDER_STATUSES = ['awaiting_payment', 'new', 'preparing', 'ready'];
+
+async function recalculateOrderTotals(client: Awaited<ReturnType<typeof getClient>>, orderId: string): Promise<number> {
+  const items = await client.query(
+    'SELECT quantity, unit_price FROM order_items WHERE order_id = $1',
+    [orderId]
+  );
+  let subtotal = 0;
+  for (const row of items.rows) {
+    subtotal += Number(row.unit_price) * Number(row.quantity);
+  }
+  subtotal = Math.round(subtotal * 100) / 100;
+  await client.query(
+    `UPDATE orders SET subtotal = $1, service_charge = 0, tax = 0, total = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    [subtotal, orderId]
+  );
+  return subtotal;
+}
+
+async function syncAmountPaid(client: Awaited<ReturnType<typeof getClient>>, orderId: string): Promise<number> {
+  const paid = await client.query(
+    `SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE order_id = $1 AND status = 'completed'`,
+    [orderId]
+  );
+  const amount = Math.round(Number(paid.rows[0].paid) * 100) / 100;
+  await client.query(
+    `UPDATE orders SET amount_paid = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    [amount, orderId]
+  );
+  return amount;
+}
+
+async function assertNoPendingPayments(client: Awaited<ReturnType<typeof getClient>>, orderId: string): Promise<boolean> {
+  const pending = await client.query(
+    `SELECT 1 FROM payments WHERE order_id = $1 AND status = 'pending' LIMIT 1`,
+    [orderId]
+  );
+  return pending.rows.length === 0;
+}
+
 export const updateTableStatus = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
@@ -184,6 +224,272 @@ export const updateTableStatus = async (req: AuthRequest, res: Response): Promis
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// Move an open dine-in order from one table to another — frees the source
+// table and occupies the destination with the same order.
+export const transferTable = async (req: AuthRequest, res: Response): Promise<void> => {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const { id } = req.params;
+    const { target_table_id } = req.body;
+
+    if (!target_table_id) {
+      await client.query('ROLLBACK');
+      res.status(400).json({ success: false, message: 'target_table_id is required' });
+      return;
+    }
+    if (target_table_id === id) {
+      await client.query('ROLLBACK');
+      res.status(400).json({ success: false, message: 'Choose a different table to transfer to' });
+      return;
+    }
+
+    const sourceRow = await client.query(
+      `SELECT t.*, o.id AS order_id, o.order_number, o.status AS order_status
+       FROM restaurant_tables t
+       LEFT JOIN orders o ON o.id = t.current_order_id
+       WHERE t.id = $1 AND t.is_active = true FOR UPDATE`,
+      [id]
+    );
+    if (sourceRow.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ success: false, message: 'Source table not found' });
+      return;
+    }
+    const source = sourceRow.rows[0];
+    if (!source.current_order_id || !source.order_id) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'This table has no active order to transfer' });
+      return;
+    }
+    if (!OPEN_ORDER_STATUSES.includes(source.order_status)) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'Only open orders can be transferred' });
+      return;
+    }
+    if (!(await assertNoPendingPayments(client, source.order_id))) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'Finish or cancel the pending payment on this order before transferring' });
+      return;
+    }
+
+    const targetRow = await client.query(
+      'SELECT id, status, current_order_id FROM restaurant_tables WHERE id = $1 AND is_active = true FOR UPDATE',
+      [target_table_id]
+    );
+    if (targetRow.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ success: false, message: 'Destination table not found' });
+      return;
+    }
+    const target = targetRow.rows[0];
+    if (target.current_order_id) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'Destination table already has an active order — merge tables instead, or pick an empty table' });
+      return;
+    }
+    if (!['available', 'reserved', 'cleaning'].includes(target.status)) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: `Destination table is ${target.status} and cannot receive a transfer` });
+      return;
+    }
+
+    await client.query(
+      `UPDATE orders SET table_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [target_table_id, source.order_id]
+    );
+    await client.query(
+      `UPDATE restaurant_tables SET status = 'available', current_order_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [id]
+    );
+    await client.query(
+      `UPDATE restaurant_tables SET status = 'occupied', current_order_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [source.order_id, target_table_id]
+    );
+
+    await logAudit(req, {
+      action: 'table_transferred',
+      entityType: 'table',
+      entityId: id,
+      details: { from_table_id: id, to_table_id: target_table_id, order_id: source.order_id, order_number: source.order_number },
+    });
+
+    await client.query('COMMIT');
+    res.json({
+      success: true,
+      message: `Order #${source.order_number} moved to the destination table`,
+      data: { order_id: source.order_id, from_table_id: id, to_table_id: target_table_id },
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    client.release();
+  }
+};
+
+// Combine two occupied tables into one bill on the primary table (route :id).
+export const mergeTables = async (req: AuthRequest, res: Response): Promise<void> => {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const { id } = req.params;
+    const { other_table_id } = req.body;
+
+    if (!other_table_id) {
+      await client.query('ROLLBACK');
+      res.status(400).json({ success: false, message: 'other_table_id is required' });
+      return;
+    }
+    if (other_table_id === id) {
+      await client.query('ROLLBACK');
+      res.status(400).json({ success: false, message: 'Choose a different table to merge with' });
+      return;
+    }
+
+    const primaryRow = await client.query(
+      `SELECT t.*, o.id AS order_id, o.order_number, o.status AS order_status, o.guests
+       FROM restaurant_tables t
+       JOIN orders o ON o.id = t.current_order_id
+       WHERE t.id = $1 AND t.is_active = true FOR UPDATE`,
+      [id]
+    );
+    if (primaryRow.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ success: false, message: 'Primary table not found' });
+      return;
+    }
+    const primary = primaryRow.rows[0];
+    if (!OPEN_ORDER_STATUSES.includes(primary.order_status)) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'Primary table order is not open' });
+      return;
+    }
+    if (!(await assertNoPendingPayments(client, primary.order_id))) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'Finish or cancel the pending payment on the primary order before merging' });
+      return;
+    }
+
+    const secondaryRow = await client.query(
+      `SELECT t.*, o.id AS order_id, o.order_number, o.status AS order_status, o.guests
+       FROM restaurant_tables t
+       JOIN orders o ON o.id = t.current_order_id
+       WHERE t.id = $1 AND t.is_active = true FOR UPDATE`,
+      [other_table_id]
+    );
+    if (secondaryRow.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ success: false, message: 'Other table not found or has no active order' });
+      return;
+    }
+    const secondary = secondaryRow.rows[0];
+    if (!OPEN_ORDER_STATUSES.includes(secondary.order_status)) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'Other table order is not open' });
+      return;
+    }
+    if (!(await assertNoPendingPayments(client, secondary.order_id))) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'Finish or cancel the pending payment on the other order before merging' });
+      return;
+    }
+
+    const secondaryItems = await client.query(
+      'SELECT * FROM order_items WHERE order_id = $1 ORDER BY created_at',
+      [secondary.order_id]
+    );
+
+    for (const item of secondaryItems.rows) {
+      if (item.menu_item_id) {
+        const existing = await client.query(
+          `SELECT id, quantity FROM order_items
+           WHERE order_id = $1 AND menu_item_id = $2 AND unit_price = $3`,
+          [primary.order_id, item.menu_item_id, item.unit_price]
+        );
+        if (existing.rows.length > 0) {
+          const newQty = Number(existing.rows[0].quantity) + Number(item.quantity);
+          const totalPrice = Math.round(Number(item.unit_price) * newQty * 100) / 100;
+          await client.query(
+            'UPDATE order_items SET quantity = $1, total_price = $2 WHERE id = $3',
+            [newQty, totalPrice, existing.rows[0].id]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, unit_price, total_price, modifiers, special_instructions, status)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [primary.order_id, item.menu_item_id, item.item_name, item.quantity, item.unit_price, item.total_price,
+              item.modifiers, item.special_instructions, item.status || 'pending']
+          );
+        }
+      } else {
+        await client.query(
+          `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, unit_price, total_price, modifiers, special_instructions, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [primary.order_id, null, item.item_name, item.quantity, item.unit_price, item.total_price,
+            item.modifiers, item.special_instructions, item.status || 'pending']
+        );
+      }
+    }
+
+    await client.query(
+      `UPDATE payments SET order_id = $1, updated_at = CURRENT_TIMESTAMP WHERE order_id = $2`,
+      [primary.order_id, secondary.order_id]
+    );
+
+    const newTotal = await recalculateOrderTotals(client, primary.order_id);
+    await syncAmountPaid(client, primary.order_id);
+
+    const combinedGuests = Number(primary.guests || 1) + Number(secondary.guests || 1);
+    await client.query(
+      `UPDATE orders SET guests = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [combinedGuests, primary.order_id]
+    );
+
+    await client.query('DELETE FROM order_items WHERE order_id = $1', [secondary.order_id]);
+    await client.query(
+      `UPDATE orders SET status = 'cancelled', table_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [secondary.order_id]
+    );
+    await client.query(
+      `UPDATE restaurant_tables SET status = 'available', current_order_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [other_table_id]
+    );
+
+    await logAudit(req, {
+      action: 'tables_merged',
+      entityType: 'table',
+      entityId: id,
+      details: {
+        primary_table_id: id,
+        secondary_table_id: other_table_id,
+        primary_order_id: primary.order_id,
+        secondary_order_id: secondary.order_id,
+        new_total: newTotal,
+      },
+    });
+
+    await client.query('COMMIT');
+    res.json({
+      success: true,
+      message: `Merged into order #${primary.order_number} on table ${primary.table_number}`,
+      data: {
+        order_id: primary.order_id,
+        order_number: primary.order_number,
+        new_total: newTotal,
+        merged_from_table_id: other_table_id,
+      },
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    client.release();
   }
 };
 

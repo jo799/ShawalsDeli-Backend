@@ -9,7 +9,7 @@ import { getLoyaltyStats, getLoyaltyTiers, updatePointValue } from '../controlle
 import { getDailyReport, getSummaryReport } from '../controllers/reportsController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
 import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule } from '../controllers/staffController';
-import { getTables, updateTableStatus, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
+import { getTables, updateTableStatus, transferTable, mergeTables, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
 import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePurchaseOrder, getSuppliers, createSupplier } from '../controllers/purchasesController';
 import { initiateStkPush, queryStkStatus, mpesaCallback, reconcilePayment } from '../controllers/mpesaController';
 import { createHeldOrder, getHeldOrders, deleteHeldOrder } from '../controllers/heldOrdersController';
@@ -110,6 +110,8 @@ router.delete('/staff/schedules/:user_id/:shift_date', authenticate, authorize('
 // Tables
 router.get('/tables', authenticate, getTables);
 router.put('/tables/:id/status', authenticate, updateTableStatus);
+router.put('/tables/:id/transfer', authenticate, transferTable);
+router.put('/tables/:id/merge', authenticate, mergeTables);
 // Adding/editing/removing tables is floor-plan configuration, not routine
 // service — same admin/manager restriction as menu management.
 router.post('/tables', authenticate, authorize('administrator', 'manager'), createTable);

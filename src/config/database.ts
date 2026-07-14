@@ -1,7 +1,27 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolConfig, types } from 'pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+// node-postgres's default parser for "timestamp without time zone" (OID
+// 1114) treats the naive string it gets back as if it were already UTC.
+// But every TIMESTAMP column in this schema actually holds Africa/Nairobi
+// wall-clock time (see SET TIME ZONE below) — so the default parser
+// silently mislabels a value like "20:18" (correct Nairobi time) as
+// "20:18 UTC", and the browser then correctly converts *that* to Nairobi
+// local time by adding 3 more hours, landing on 23:18. The fix: parse the
+// naive components ourselves and subtract Nairobi's fixed +3 offset (no
+// DST in East Africa Time, so this is always exactly 3) before building
+// the Date, giving the correct UTC instant on the first pass instead of
+// double-applying the offset.
+types.setTypeParser(1114, (value: string) => {
+  const [datePart, timePart] = value.split(' ');
+  const [year, month, day] = datePart.split('-').map(Number);
+  const [hms, fractional] = (timePart || '00:00:00').split('.');
+  const [hour, minute, second] = hms.split(':').map(Number);
+  const ms = fractional ? Number(fractional.padEnd(3, '0').slice(0, 3)) : 0;
+  return new Date(Date.UTC(year, month - 1, day, hour - 3, minute, second, ms));
+});
 
 const config: PoolConfig = {
   host: process.env.DB_HOST || 'localhost',

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { login, register, forgotPassword, verifyResetOtp, resetPassword, getProfile, changePassword, verifyLoginOtp, getSystemStatus, setupFirstAdmin } from '../controllers/authController';
 import { getOrders, getOrderById, createOrder, updateOrderStatus, processPayment, cancelPendingPayment, refundOrder, voidOrder, getOrderStats } from '../controllers/ordersController';
-import { getMenuItems, getCategories, createMenuItem, updateMenuItem, deleteMenuItem, getRecipe, setRecipe, getMenuItemByBarcode } from '../controllers/menuController';
+import { getMenuItems, getCategories, createCategory, updateCategory, deleteCategory, createMenuItem, updateMenuItem, deleteMenuItem, getRecipe, setRecipe, getMenuItemByBarcode } from '../controllers/menuController';
 import { uploadMenuImage } from '../controllers/uploadController';
 import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock } from '../controllers/inventoryController';
 import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, redeemPoints, adjustPoints } from '../controllers/customersController';
@@ -49,6 +49,9 @@ router.post('/orders/:id/void', authenticate, authorize('administrator', 'manage
 // Menu
 router.get('/menu/items', authenticate, getMenuItems);
 router.get('/menu/categories', authenticate, getCategories);
+router.post('/menu/categories', authenticate, authorize('administrator', 'manager'), createCategory);
+router.put('/menu/categories/:id', authenticate, authorize('administrator', 'manager'), updateCategory);
+router.delete('/menu/categories/:id', authenticate, authorize('administrator', 'manager'), deleteCategory);
 router.post('/menu/items', authenticate, authorize('administrator', 'manager'), createMenuItem);
 router.post('/menu/upload', authenticate, authorize('administrator', 'manager'), uploadMenuImage);
 router.put('/menu/items/:id', authenticate, authorize('administrator', 'manager'), updateMenuItem);

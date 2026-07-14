@@ -13,7 +13,12 @@ export const getMenuItems = async (req: Request, res: Response): Promise<void> =
 
     if (category_id) { conditions.push(`m.category_id = $${idx++}`); params.push(category_id); }
     if (status && status !== 'all') {
-      conditions.push(`m.status = $${idx++}`); params.push(status);
+      const statuses = String(status).split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        conditions.push(`m.status = $${idx++}`); params.push(statuses[0]);
+      } else {
+        conditions.push(`m.status = ANY($${idx++})`); params.push(statuses);
+      }
     } else if (!status) {
       // Default listing (no status param at all) hides archived items — this
       // is what the Menu admin grid and the POS both rely on. Deleting an
@@ -61,6 +66,77 @@ export const getCategories = async (_req: Request, res: Response): Promise<void>
   }
 };
 
+// Previously missing entirely — a genuinely fresh database (no seed data)
+// had no menu categories and no way to create the first one, meaning the
+// category dropdown everywhere else would always be empty with no path
+// forward.
+export const createCategory = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { name, description, sort_order } = req.body;
+    if (!name || !name.toString().trim()) {
+      res.status(400).json({ success: false, message: 'name is required' });
+      return;
+    }
+    const trimmed = name.toString().trim();
+    const dupe = await query('SELECT id FROM menu_categories WHERE LOWER(name) = LOWER($1) AND is_active = true', [trimmed]);
+    if (dupe.rows.length) {
+      res.status(400).json({ success: false, message: `A category named "${trimmed}" already exists` });
+      return;
+    }
+    const result = await query(
+      `INSERT INTO menu_categories (name, description, sort_order) VALUES ($1,$2,$3) RETURNING *, 0 as item_count`,
+      [trimmed, description || null, Number.isFinite(Number(sort_order)) ? Number(sort_order) : 0]
+    );
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+export const updateCategory = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { name, description, sort_order } = req.body;
+    if (!name || !name.toString().trim()) {
+      res.status(400).json({ success: false, message: 'name is required' });
+      return;
+    }
+    const trimmed = name.toString().trim();
+    const dupe = await query('SELECT id FROM menu_categories WHERE LOWER(name) = LOWER($1) AND is_active = true AND id != $2', [trimmed, id]);
+    if (dupe.rows.length) {
+      res.status(400).json({ success: false, message: `A category named "${trimmed}" already exists` });
+      return;
+    }
+    const result = await query(
+      `UPDATE menu_categories SET name=$1, description=$2, sort_order=COALESCE($3, sort_order), updated_at=CURRENT_TIMESTAMP WHERE id=$4 RETURNING *`,
+      [trimmed, description || null, Number.isFinite(Number(sort_order)) ? Number(sort_order) : null, id]
+    );
+    if (!result.rows.length) { res.status(404).json({ success: false, message: 'Category not found' }); return; }
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// Soft delete — menu_items.category_id references this table, and existing
+// items shouldn't lose their category label just because it was retired.
+export const deleteCategory = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const result = await query(
+      `UPDATE menu_categories SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING id`,
+      [id]
+    );
+    if (!result.rows.length) { res.status(404).json({ success: false, message: 'Category not found' }); return; }
+    res.json({ success: true, message: 'Category removed' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 export const createMenuItem = async (req: Request, res: Response): Promise<void> => {
   try {
     const { name, description, price, cost, category_id, preparation_time, status, tags, image_url,
@@ -100,7 +176,7 @@ export const createMenuItem = async (req: Request, res: Response): Promise<void>
       INSERT INTO menu_items (name, description, price, cost, category_id, preparation_time, status, tags, image_url,
         track_stock, stock_quantity, reorder_level, barcode)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
-    `, [name.toString().trim(), description, numericPrice, cost || 0, category_id, preparation_time || 15, status || 'available', tags || [], image_url || null,
+    `, [name.toString().trim(), description, numericPrice, cost || 0, category_id || null, preparation_time || 15, status || 'available', tags || [], image_url || null,
         trackStock, stockQty, reorderLvl, trimmedBarcode]);
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -151,7 +227,7 @@ export const updateMenuItem = async (req: AuthRequest, res: Response): Promise<v
         preparation_time=$6, status=$7, tags=$8, image_url=$9,
         track_stock=$10, stock_quantity=$11, reorder_level=$12, barcode=$13, updated_at=CURRENT_TIMESTAMP
       WHERE id=$14 RETURNING *
-    `, [name, description, price, cost, category_id, preparation_time, status, tags, image_url,
+    `, [name, description, price, cost, category_id || null, preparation_time, status, tags, image_url,
         trackStock, stockQty, reorderLvl, trimmedBarcode, id]);
     if (!result.rows.length) { res.status(404).json({ success: false, message: 'Item not found' }); return; }
 

@@ -180,6 +180,46 @@ async function assertNoPendingPayments(client: Awaited<ReturnType<typeof getClie
   return pending.rows.length === 0;
 }
 
+type LockedTableOrder = {
+  table: { id: string; status: string; current_order_id: string | null; table_number?: string };
+  order: { id: string; order_number: string; status: string; guests?: number } | null;
+};
+
+// Lock tables in a stable order (by id) to avoid deadlocks, then load each
+// table's linked order in a separate query. PostgreSQL rejects FOR UPDATE on
+// the nullable side of a LEFT JOIN, and even INNER JOIN + FOR UPDATE OF is
+// brittle across versions — separate queries are simpler and reliable.
+async function lockTablesAndOrders(
+  client: Awaited<ReturnType<typeof getClient>>,
+  tableIds: string[]
+): Promise<Map<string, LockedTableOrder | null>> {
+  const uniqueIds = [...new Set(tableIds)].sort();
+  const result = new Map<string, LockedTableOrder | null>();
+
+  for (const tableId of uniqueIds) {
+    const tableRow = await client.query(
+      `SELECT id, table_number, status, current_order_id FROM restaurant_tables
+       WHERE id = $1 AND is_active = true FOR UPDATE`,
+      [tableId]
+    );
+    if (tableRow.rows.length === 0) {
+      result.set(tableId, null);
+      continue;
+    }
+    const table = tableRow.rows[0];
+    if (!table.current_order_id) {
+      result.set(tableId, { table, order: null });
+      continue;
+    }
+    const orderRow = await client.query(
+      `SELECT id, order_number, status, guests FROM orders WHERE id = $1 FOR UPDATE`,
+      [table.current_order_id]
+    );
+    result.set(tableId, { table, order: orderRow.rows[0] || null });
+  }
+  return result;
+}
+
 export const updateTableStatus = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
@@ -247,45 +287,37 @@ export const transferTable = async (req: AuthRequest, res: Response): Promise<vo
       return;
     }
 
-    const sourceRow = await client.query(
-      `SELECT t.*, o.id AS order_id, o.order_number, o.status AS order_status
-       FROM restaurant_tables t
-       LEFT JOIN orders o ON o.id = t.current_order_id
-       WHERE t.id = $1 AND t.is_active = true FOR UPDATE`,
-      [id]
-    );
-    if (sourceRow.rows.length === 0) {
+    const locked = await lockTablesAndOrders(client, [id, target_table_id]);
+    const sourceEntry = locked.get(id);
+    if (!sourceEntry) {
       await client.query('ROLLBACK');
       res.status(404).json({ success: false, message: 'Source table not found' });
       return;
     }
-    const source = sourceRow.rows[0];
-    if (!source.current_order_id || !source.order_id) {
+    const sourceOrder = sourceEntry.order;
+    if (!sourceEntry.table.current_order_id || !sourceOrder) {
       await client.query('ROLLBACK');
       res.status(409).json({ success: false, message: 'This table has no active order to transfer' });
       return;
     }
-    if (!OPEN_ORDER_STATUSES.includes(source.order_status)) {
+    if (!OPEN_ORDER_STATUSES.includes(sourceOrder.status)) {
       await client.query('ROLLBACK');
       res.status(409).json({ success: false, message: 'Only open orders can be transferred' });
       return;
     }
-    if (!(await assertNoPendingPayments(client, source.order_id))) {
+    if (!(await assertNoPendingPayments(client, sourceOrder.id))) {
       await client.query('ROLLBACK');
       res.status(409).json({ success: false, message: 'Finish or cancel the pending payment on this order before transferring' });
       return;
     }
 
-    const targetRow = await client.query(
-      'SELECT id, status, current_order_id FROM restaurant_tables WHERE id = $1 AND is_active = true FOR UPDATE',
-      [target_table_id]
-    );
-    if (targetRow.rows.length === 0) {
+    const targetEntry = locked.get(target_table_id);
+    if (!targetEntry) {
       await client.query('ROLLBACK');
       res.status(404).json({ success: false, message: 'Destination table not found' });
       return;
     }
-    const target = targetRow.rows[0];
+    const target = targetEntry.table;
     if (target.current_order_id) {
       await client.query('ROLLBACK');
       res.status(409).json({ success: false, message: 'Destination table already has an active order — merge tables instead, or pick an empty table' });
@@ -299,7 +331,7 @@ export const transferTable = async (req: AuthRequest, res: Response): Promise<vo
 
     await client.query(
       `UPDATE orders SET table_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-      [target_table_id, source.order_id]
+      [target_table_id, sourceOrder.id]
     );
     await client.query(
       `UPDATE restaurant_tables SET status = 'available', current_order_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -307,25 +339,26 @@ export const transferTable = async (req: AuthRequest, res: Response): Promise<vo
     );
     await client.query(
       `UPDATE restaurant_tables SET status = 'occupied', current_order_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-      [source.order_id, target_table_id]
+      [sourceOrder.id, target_table_id]
     );
+
+    await client.query('COMMIT');
 
     await logAudit(req, {
       action: 'table_transferred',
       entityType: 'table',
       entityId: id,
-      details: { from_table_id: id, to_table_id: target_table_id, order_id: source.order_id, order_number: source.order_number },
+      details: { from_table_id: id, to_table_id: target_table_id, order_id: sourceOrder.id, order_number: sourceOrder.order_number },
     });
 
-    await client.query('COMMIT');
     res.json({
       success: true,
-      message: `Order #${source.order_number} moved to the destination table`,
-      data: { order_id: source.order_id, from_table_id: id, to_table_id: target_table_id },
+      message: `Order #${sourceOrder.order_number} moved to the destination table`,
+      data: { order_id: sourceOrder.id, from_table_id: id, to_table_id: target_table_id },
     });
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error(error);
+    await client.query('ROLLBACK').catch(() => undefined);
+    console.error('transferTable error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     client.release();
@@ -351,49 +384,48 @@ export const mergeTables = async (req: AuthRequest, res: Response): Promise<void
       return;
     }
 
-    const primaryRow = await client.query(
-      `SELECT t.*, o.id AS order_id, o.order_number, o.status AS order_status, o.guests
-       FROM restaurant_tables t
-       JOIN orders o ON o.id = t.current_order_id
-       WHERE t.id = $1 AND t.is_active = true FOR UPDATE`,
-      [id]
-    );
-    if (primaryRow.rows.length === 0) {
+    const locked = await lockTablesAndOrders(client, [id, other_table_id]);
+    const primaryEntry = locked.get(id);
+    if (!primaryEntry) {
       await client.query('ROLLBACK');
       res.status(404).json({ success: false, message: 'Primary table not found' });
       return;
     }
-    const primary = primaryRow.rows[0];
-    if (!OPEN_ORDER_STATUSES.includes(primary.order_status)) {
+    const primaryOrder = primaryEntry.order;
+    if (!primaryEntry.table.current_order_id || !primaryOrder) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, message: 'Primary table has no active order to merge' });
+      return;
+    }
+    if (!OPEN_ORDER_STATUSES.includes(primaryOrder.status)) {
       await client.query('ROLLBACK');
       res.status(409).json({ success: false, message: 'Primary table order is not open' });
       return;
     }
-    if (!(await assertNoPendingPayments(client, primary.order_id))) {
+    if (!(await assertNoPendingPayments(client, primaryOrder.id))) {
       await client.query('ROLLBACK');
       res.status(409).json({ success: false, message: 'Finish or cancel the pending payment on the primary order before merging' });
       return;
     }
 
-    const secondaryRow = await client.query(
-      `SELECT t.*, o.id AS order_id, o.order_number, o.status AS order_status, o.guests
-       FROM restaurant_tables t
-       JOIN orders o ON o.id = t.current_order_id
-       WHERE t.id = $1 AND t.is_active = true FOR UPDATE`,
-      [other_table_id]
-    );
-    if (secondaryRow.rows.length === 0) {
+    const secondaryEntry = locked.get(other_table_id);
+    if (!secondaryEntry) {
       await client.query('ROLLBACK');
-      res.status(404).json({ success: false, message: 'Other table not found or has no active order' });
+      res.status(404).json({ success: false, message: 'Other table not found' });
       return;
     }
-    const secondary = secondaryRow.rows[0];
-    if (!OPEN_ORDER_STATUSES.includes(secondary.order_status)) {
+    const secondaryOrder = secondaryEntry.order;
+    if (!secondaryEntry.table.current_order_id || !secondaryOrder) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ success: false, message: 'Other table has no active order to merge' });
+      return;
+    }
+    if (!OPEN_ORDER_STATUSES.includes(secondaryOrder.status)) {
       await client.query('ROLLBACK');
       res.status(409).json({ success: false, message: 'Other table order is not open' });
       return;
     }
-    if (!(await assertNoPendingPayments(client, secondary.order_id))) {
+    if (!(await assertNoPendingPayments(client, secondaryOrder.id))) {
       await client.query('ROLLBACK');
       res.status(409).json({ success: false, message: 'Finish or cancel the pending payment on the other order before merging' });
       return;
@@ -401,7 +433,7 @@ export const mergeTables = async (req: AuthRequest, res: Response): Promise<void
 
     const secondaryItems = await client.query(
       'SELECT * FROM order_items WHERE order_id = $1 ORDER BY created_at',
-      [secondary.order_id]
+      [secondaryOrder.id]
     );
 
     for (const item of secondaryItems.rows) {
@@ -409,7 +441,7 @@ export const mergeTables = async (req: AuthRequest, res: Response): Promise<void
         const existing = await client.query(
           `SELECT id, quantity FROM order_items
            WHERE order_id = $1 AND menu_item_id = $2 AND unit_price = $3`,
-          [primary.order_id, item.menu_item_id, item.unit_price]
+          [primaryOrder.id, item.menu_item_id, item.unit_price]
         );
         if (existing.rows.length > 0) {
           const newQty = Number(existing.rows[0].quantity) + Number(item.quantity);
@@ -422,7 +454,7 @@ export const mergeTables = async (req: AuthRequest, res: Response): Promise<void
           await client.query(
             `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, unit_price, total_price, modifiers, special_instructions, status)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-            [primary.order_id, item.menu_item_id, item.item_name, item.quantity, item.unit_price, item.total_price,
+            [primaryOrder.id, item.menu_item_id, item.item_name, item.quantity, item.unit_price, item.total_price,
               item.modifiers, item.special_instructions, item.status || 'pending']
           );
         }
@@ -430,7 +462,7 @@ export const mergeTables = async (req: AuthRequest, res: Response): Promise<void
         await client.query(
           `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, unit_price, total_price, modifiers, special_instructions, status)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [primary.order_id, null, item.item_name, item.quantity, item.unit_price, item.total_price,
+          [primaryOrder.id, null, item.item_name, item.quantity, item.unit_price, item.total_price,
             item.modifiers, item.special_instructions, item.status || 'pending']
         );
       }
@@ -438,27 +470,29 @@ export const mergeTables = async (req: AuthRequest, res: Response): Promise<void
 
     await client.query(
       `UPDATE payments SET order_id = $1, updated_at = CURRENT_TIMESTAMP WHERE order_id = $2`,
-      [primary.order_id, secondary.order_id]
+      [primaryOrder.id, secondaryOrder.id]
     );
 
-    const newTotal = await recalculateOrderTotals(client, primary.order_id);
-    await syncAmountPaid(client, primary.order_id);
+    const newTotal = await recalculateOrderTotals(client, primaryOrder.id);
+    await syncAmountPaid(client, primaryOrder.id);
 
-    const combinedGuests = Number(primary.guests || 1) + Number(secondary.guests || 1);
+    const combinedGuests = Number(primaryOrder.guests || 1) + Number(secondaryOrder.guests || 1);
     await client.query(
       `UPDATE orders SET guests = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-      [combinedGuests, primary.order_id]
+      [combinedGuests, primaryOrder.id]
     );
 
-    await client.query('DELETE FROM order_items WHERE order_id = $1', [secondary.order_id]);
+    await client.query('DELETE FROM order_items WHERE order_id = $1', [secondaryOrder.id]);
     await client.query(
       `UPDATE orders SET status = 'cancelled', table_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-      [secondary.order_id]
+      [secondaryOrder.id]
     );
     await client.query(
       `UPDATE restaurant_tables SET status = 'available', current_order_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [other_table_id]
     );
+
+    await client.query('COMMIT');
 
     await logAudit(req, {
       action: 'tables_merged',
@@ -467,26 +501,25 @@ export const mergeTables = async (req: AuthRequest, res: Response): Promise<void
       details: {
         primary_table_id: id,
         secondary_table_id: other_table_id,
-        primary_order_id: primary.order_id,
-        secondary_order_id: secondary.order_id,
+        primary_order_id: primaryOrder.id,
+        secondary_order_id: secondaryOrder.id,
         new_total: newTotal,
       },
     });
 
-    await client.query('COMMIT');
     res.json({
       success: true,
-      message: `Merged into order #${primary.order_number} on table ${primary.table_number}`,
+      message: `Merged into order #${primaryOrder.order_number} on table ${primaryEntry.table.table_number}`,
       data: {
-        order_id: primary.order_id,
-        order_number: primary.order_number,
+        order_id: primaryOrder.id,
+        order_number: primaryOrder.order_number,
         new_total: newTotal,
         merged_from_table_id: other_table_id,
       },
     });
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error(error);
+    await client.query('ROLLBACK').catch(() => undefined);
+    console.error('mergeTables error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     client.release();

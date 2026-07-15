@@ -4,6 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import { deductInventoryForOrder, restockInventoryForOrder } from '../services/inventoryService';
 import { applyPaymentToOrder } from '../services/paymentservice';
 import { logAudit } from '../services/auditLog';
+import { notifyKitchenOfNewOrder } from '../services/pushService';
 
 // Timestamp slice alone can collide under concurrent load (two orders in
 // the same second, or across multiple app instances/replicas). The random
@@ -69,11 +70,12 @@ export const getOrders = async (req: Request, res: Response): Promise<void> => {
     params.push(Number(limit), offset);
     const result = await query(`
       SELECT o.*, t.table_number, c.full_name as customer_full_name,
-             u.full_name as served_by_name
+             u.full_name as served_by_name, p.full_name as prepared_by_name
       FROM orders o
       LEFT JOIN restaurant_tables t ON o.table_id = t.id
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.served_by = u.id
+      LEFT JOIN users p ON o.prepared_by = p.id
       ${where}
       ORDER BY ${orderByColumn}
       LIMIT $${paramIdx++} OFFSET $${paramIdx++}
@@ -124,10 +126,13 @@ export const getOrderById = async (req: Request, res: Response): Promise<void> =
   try {
     const { id } = req.params;
     const orderResult = await query(`
-      SELECT o.*, t.table_number, c.full_name as customer_full_name, c.phone as customer_phone
+      SELECT o.*, t.table_number, c.full_name as customer_full_name, c.phone as customer_phone,
+             u.full_name as served_by_name, p.full_name as prepared_by_name
       FROM orders o
       LEFT JOIN restaurant_tables t ON o.table_id = t.id
       LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN users u ON o.served_by = u.id
+      LEFT JOIN users p ON o.prepared_by = p.id
       WHERE o.id = $1
     `, [id]);
 
@@ -291,6 +296,16 @@ export const createOrder = async (req: AuthRequest, res: Response): Promise<void
     }
 
     await client.query('COMMIT');
+
+    if (initialStatus === 'new') {
+      notifyKitchenOfNewOrder({
+        title: '🔔 New Order',
+        body: `Order #${order.order_number} — ${resolvedItems.length} item${resolvedItems.length !== 1 ? 's' : ''}${table_id ? ' · Dine In' : ''}`,
+        orderId: order.id,
+        orderNumber: order.order_number,
+      }).catch(() => {}); // Never let a notification failure affect the order response.
+    }
+
     res.status(201).json({
       success: true,
       data: order,
@@ -366,10 +381,12 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response): Promis
     }
 
     const completedAt = status === 'completed' ? 'CURRENT_TIMESTAMP' : 'NULL';
+    const preparedByClause = status === 'preparing' ? 'COALESCE(prepared_by, $3)' : 'prepared_by';
     const result = await client.query(`
-      UPDATE orders SET status = $1, completed_at = ${completedAt}, updated_at = CURRENT_TIMESTAMP
+      UPDATE orders SET status = $1, completed_at = ${completedAt}, updated_at = CURRENT_TIMESTAMP,
+        prepared_by = ${preparedByClause}
       WHERE id = $2 RETURNING *
-    `, [status, id]);
+    `, status === 'preparing' ? [status, id, req.user!.id] : [status, id]);
 
     const order = result.rows[0];
     if (status === 'completed' && order.table_id) {

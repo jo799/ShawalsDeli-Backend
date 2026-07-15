@@ -956,6 +956,30 @@ const createTables = async () => {
       END $$;
     `);
 
+    // Chef accountability — separate from served_by (who took/rang up the
+    // order, usually a cashier/waiter). This is specifically who actually
+    // cooked it: set the moment an order moves to 'preparing', so if a
+    // dish comes back wrong there's a real answer to "who made this",
+    // not just who sold it.
+    await client.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS prepared_by UUID REFERENCES users(id) ON DELETE SET NULL`);
+
+    // Web Push subscriptions — lets the backend notify a kitchen staff
+    // member's phone the moment a new order comes in, without needing a
+    // native app or any SMS cost. One row per device a person has opted
+    // in on (the same person could reasonably have this open on both a
+    // kitchen tablet and their own phone) — endpoint is unique per
+    // device/browser registration, so re-subscribing the same device just
+    // updates its existing row instead of accumulating duplicates.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        endpoint TEXT NOT NULL UNIQUE,
+        subscription JSONB NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');
   } catch (error) {

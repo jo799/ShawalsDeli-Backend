@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "npm run db:migrate && node dist/server.js",
     "db:migrate": "node -r ts-node/register src/migrations/migrate.ts",
     "db:seed": "node -r ts-node/register src/seeders/seed.ts",
     "db:reset": "node -r ts-node/register src/migrations/reset.ts"

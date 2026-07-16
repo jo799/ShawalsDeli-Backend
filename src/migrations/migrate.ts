@@ -458,7 +458,7 @@ const createTables = async () => {
       CREATE TABLE IF NOT EXISTS payments (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         order_id UUID REFERENCES orders(id) ON DELETE SET NULL,
-        payment_method VARCHAR(30) NOT NULL CHECK (payment_method IN ('cash','mpesa','card','split','points')),
+        payment_method VARCHAR(30) NOT NULL CHECK (payment_method IN ('cash','mpesa','card','till','split','points')),
         amount DECIMAL(10,2) NOT NULL CHECK (amount > 0),
         status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending','completed','failed','cancelled','expired','refunded')),
         reference VARCHAR(100) UNIQUE,
@@ -938,9 +938,12 @@ const createTables = async () => {
     `);
     // Existing installations already have the old CHECK constraint baked in
     // (changing the CREATE TABLE statement above only affects brand new
-    // databases) — drop and recreate it with 'points' included.
+    // databases) — drop and recreate it, now also including 'till' (M-Pesa
+    // Buy Goods paid directly to the till by the customer's own phone,
+    // confirmed manually by the cashier — same idea as cash/card, no STK
+    // push or API integration involved).
     await client.query(`ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check`);
-    await client.query(`ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check CHECK (payment_method IN ('cash','mpesa','card','split','points'))`);
+    await client.query(`ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check CHECK (payment_method IN ('cash','mpesa','card','till','split','points'))`);
 
     await client.query(`ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(100)`);
     await client.query(`

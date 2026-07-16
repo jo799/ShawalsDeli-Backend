@@ -6,6 +6,7 @@ import { applyPaymentToOrder } from '../services/paymentservice';
 import { logAudit } from '../services/auditLog';
 import { notifyKitchenOfNewOrder } from '../services/pushService';
 
+
 // Timestamp slice alone can collide under concurrent load (two orders in
 // the same second, or across multiple app instances/replicas). The random
 // suffix doesn't make this cryptographically unique, but combined with the
@@ -298,12 +299,14 @@ export const createOrder = async (req: AuthRequest, res: Response): Promise<void
     await client.query('COMMIT');
 
     if (initialStatus === 'new') {
+      const orderSummary = `Order #${order.order_number} — ${resolvedItems.length} item${resolvedItems.length !== 1 ? 's' : ''}${table_id ? ' · Dine In' : ''}`;
       notifyKitchenOfNewOrder({
         title: '🔔 New Order',
-        body: `Order #${order.order_number} — ${resolvedItems.length} item${resolvedItems.length !== 1 ? 's' : ''}${table_id ? ' · Dine In' : ''}`,
+        body: orderSummary,
         orderId: order.id,
         orderNumber: order.order_number,
       }).catch(() => {}); // Never let a notification failure affect the order response.
+     
     }
 
     res.status(201).json({
@@ -444,13 +447,13 @@ export const processPayment = async (req: AuthRequest, res: Response): Promise<v
       }
     }
 
-    if (!['cash', 'card', 'split', 'points'].includes(payment_method)) {
+    if (!['cash', 'card', 'till', 'split', 'points'].includes(payment_method)) {
       await client.query('ROLLBACK');
       res.status(400).json({
         success: false,
         message: payment_method === 'mpesa'
           ? 'Use /api/mpesa/stk-push for M-Pesa payments'
-          : 'payment_method must be one of: cash, card, split, points',
+          : 'payment_method must be one of: cash, card, till, split, points',
       });
       return;
     }
@@ -591,9 +594,7 @@ export const processPayment = async (req: AuthRequest, res: Response): Promise<v
       ...(outcome.stockWarnings.length > 0 ? { stock_warnings: outcome.stockWarnings } : {}),
       message: !outcome.isFullyPaid
         ? `Partial payment recorded. KES ${outcome.balanceRemaining.toFixed(2)} still due.`
-        : outcome.newlyCompleted
-          ? 'Payment complete. Order marked as completed.'
-          : 'Payment recorded. Order sent to kitchen.',
+        : 'Payment recorded. Order sent to kitchen.',
     });
   } catch (error) {
     await client.query('ROLLBACK');

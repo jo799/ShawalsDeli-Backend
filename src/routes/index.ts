@@ -45,11 +45,13 @@ router.post('/orders/:id/cancel-payment', authenticate, cancelPendingPayment);
 // Returning money and voiding paid orders directly is an administrator-only
 // action now — they're the approval authority for the refund-request
 // workflow below, so there's no one left to check an admin doing this
-// directly. A manager submits a request instead (see requestRefund) — no
-// money moves until an admin explicitly approves it.
+// directly. Managers and cashiers submit a request instead (see
+// requestRefund) — no money moves until an admin explicitly approves it,
+// so there's no added risk in letting whoever's actually facing the
+// customer kick one off.
 router.post('/orders/:id/refund', authenticate, authorize('administrator'), refundOrder);
 router.post('/orders/:id/void', authenticate, authorize('administrator'), voidOrder);
-router.post('/orders/:id/refund-request', authenticate, authorize('administrator', 'manager'), requestRefund);
+router.post('/orders/:id/refund-request', authenticate, authorize('administrator', 'manager', 'cashier'), requestRefund);
 router.get('/refund-requests', authenticate, authorize('administrator'), getRefundRequests);
 router.post('/refund-requests/:id/approve', authenticate, authorize('administrator'), approveRefundRequest);
 router.post('/refund-requests/:id/decline', authenticate, authorize('administrator'), declineRefundRequest);

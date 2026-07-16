@@ -19,6 +19,57 @@ if (configured) {
 export const isPushConfigured = () => configured;
 export const getVapidPublicKey = () => publicKey || null;
 
+interface PushPayload {
+  title: string;
+  body: string;
+  tag: string;
+  url: string;
+}
+
+// Shared delivery mechanism behind every notification type this app sends.
+// Looks up every device subscribed by someone in one of the given roles,
+// sends to all of them (a person can reasonably have more than one
+// subscribed device — a kitchen tablet and their own phone — and there's
+// no way to know which one they'll actually have on them), and cleans up
+// any subscription the browser itself has reported as dead (404/410)
+// rather than retrying it forever.
+const sendPushToRoles = async (roles: string[], payload: PushPayload): Promise<void> => {
+  if (!configured) return; // Not set up — fail silently, never block whatever triggered this.
+
+  try {
+    const subs = await query(`
+      SELECT ps.id, ps.endpoint, ps.subscription
+      FROM push_subscriptions ps
+      JOIN users u ON ps.user_id = u.id
+      WHERE u.role = ANY($1) AND u.status = 'active'
+    `, [roles]);
+
+    await Promise.all(subs.rows.map(async (row) => {
+      try {
+        await webpush.sendNotification(row.subscription, JSON.stringify({
+          title: payload.title,
+          body: payload.body,
+          tag: payload.tag,
+          data: { url: payload.url },
+        }));
+      } catch (err: unknown) {
+        const statusCode = (err as { statusCode?: number })?.statusCode;
+        if (statusCode === 404 || statusCode === 410) {
+          await query('DELETE FROM push_subscriptions WHERE id = $1', [row.id]).catch(() => {});
+        } else {
+          console.error('Push notification failed for subscription', row.id, err);
+        }
+      }
+    }));
+  } catch (error) {
+    // A notification failure should never prevent whatever triggered it
+    // (an order, a refund request) from succeeding — this is a
+    // nice-to-have alert layered on top of a working flow, not a
+    // dependency of it.
+    console.error('sendPushToRoles error:', error);
+  }
+};
+
 interface OrderNotificationPayload {
   title: string;
   body: string;
@@ -28,46 +79,25 @@ interface OrderNotificationPayload {
 
 // Sends to every device kitchen staff (kitchen_staff, head_chef,
 // administrator, manager — the roles that can actually see Kitchen
-// Display) has subscribed. A person can have more than one subscribed
-// device (a tablet at the kitchen pass, their own phone) — all of them
-// get notified, since there's no way to know which one they'll actually
-// have on them.
+// Display) has subscribed.
 export const notifyKitchenOfNewOrder = async (payload: OrderNotificationPayload): Promise<void> => {
-  if (!configured) return; // Not set up — fail silently, never block order creation on this.
+  await sendPushToRoles(
+    ['kitchen_staff', 'head_chef', 'administrator', 'manager'],
+    { title: payload.title, body: payload.body, tag: `order-${payload.orderId}`, url: '/kitchen' }
+  );
+};
 
-  try {
-    const subs = await query(`
-      SELECT ps.id, ps.endpoint, ps.subscription
-      FROM push_subscriptions ps
-      JOIN users u ON ps.user_id = u.id
-      WHERE u.role IN ('kitchen_staff', 'head_chef', 'administrator', 'manager')
-        AND u.status = 'active'
-    `);
+interface RefundRequestNotificationPayload {
+  title: string;
+  body: string;
+  orderId: string;
+}
 
-    await Promise.all(subs.rows.map(async (row) => {
-      try {
-        await webpush.sendNotification(row.subscription, JSON.stringify({
-          title: payload.title,
-          body: payload.body,
-          tag: `order-${payload.orderId}`, // Replaces any existing notification for the same order rather than stacking duplicates if this ever fires twice.
-          data: { url: '/kitchen', orderId: payload.orderId },
-        }));
-      } catch (err: unknown) {
-        const statusCode = (err as { statusCode?: number })?.statusCode;
-        // 404/410 mean the browser has unsubscribed or the subscription
-        // expired — clean these up now rather than retrying a dead
-        // endpoint on every future order indefinitely.
-        if (statusCode === 404 || statusCode === 410) {
-          await query('DELETE FROM push_subscriptions WHERE id = $1', [row.id]).catch(() => {});
-        } else {
-          console.error('Push notification failed for subscription', row.id, err);
-        }
-      }
-    }));
-  } catch (error) {
-    // A notification failure should never prevent the order itself from
-    // succeeding — this is a nice-to-have alert layered on top of a
-    // working order flow, not a dependency of it.
-    console.error('notifyKitchenOfNewOrder error:', error);
-  }
+// Administrator-only — they're the sole approval authority for a manager's
+// refund request, so nobody else needs to be notified.
+export const notifyAdminsOfRefundRequest = async (payload: RefundRequestNotificationPayload): Promise<void> => {
+  await sendPushToRoles(
+    ['administrator'],
+    { title: payload.title, body: payload.body, tag: `refund-${payload.orderId}`, url: '/orders' }
+  );
 };

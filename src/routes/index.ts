@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { login, register, forgotPassword, verifyResetOtp, resetPassword, getProfile, changePassword, verifyLoginOtp, getSystemStatus, setupFirstAdmin } from '../controllers/authController';
-import { getOrders, getOrderById, createOrder, updateOrderStatus, processPayment, cancelPendingPayment, refundOrder, voidOrder, getOrderStats } from '../controllers/ordersController';
+import { getOrders, getOrderById, createOrder, updateOrderStatus, processPayment, cancelPendingPayment, refundOrder, voidOrder, getOrderStats, requestRefund, getRefundRequests, approveRefundRequest, declineRefundRequest } from '../controllers/ordersController';
 import { getMenuItems, getCategories, createCategory, updateCategory, deleteCategory, createMenuItem, updateMenuItem, deleteMenuItem, getRecipe, setRecipe, getMenuItemByBarcode } from '../controllers/menuController';
 import { uploadMenuImage } from '../controllers/uploadController';
 import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock } from '../controllers/inventoryController';
@@ -42,10 +42,17 @@ router.post('/orders', authenticate, createOrder);
 router.put('/orders/:id/status', authenticate, updateOrderStatus);
 router.post('/orders/:id/payment', authenticate, processPayment);
 router.post('/orders/:id/cancel-payment', authenticate, cancelPendingPayment);
-// Returning money and voiding paid orders is a manager/admin action — it moves
-// money out of the business and reverses loyalty/stock.
-router.post('/orders/:id/refund', authenticate, authorize('administrator', 'manager'), refundOrder);
-router.post('/orders/:id/void', authenticate, authorize('administrator', 'manager'), voidOrder);
+// Returning money and voiding paid orders directly is an administrator-only
+// action now — they're the approval authority for the refund-request
+// workflow below, so there's no one left to check an admin doing this
+// directly. A manager submits a request instead (see requestRefund) — no
+// money moves until an admin explicitly approves it.
+router.post('/orders/:id/refund', authenticate, authorize('administrator'), refundOrder);
+router.post('/orders/:id/void', authenticate, authorize('administrator'), voidOrder);
+router.post('/orders/:id/refund-request', authenticate, authorize('administrator', 'manager'), requestRefund);
+router.get('/refund-requests', authenticate, authorize('administrator'), getRefundRequests);
+router.post('/refund-requests/:id/approve', authenticate, authorize('administrator'), approveRefundRequest);
+router.post('/refund-requests/:id/decline', authenticate, authorize('administrator'), declineRefundRequest);
 
 // Menu
 router.get('/menu/items', authenticate, getMenuItems);

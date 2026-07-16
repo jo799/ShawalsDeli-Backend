@@ -983,6 +983,34 @@ const createTables = async () => {
       )
     `);
 
+    // Refund approval workflow — deliberately a separate table from the
+    // existing, immutable `refunds` ledger rather than a status column
+    // bolted onto it. A request is a proposal: revocable, reviewable,
+    // and — critically — has NOT moved any money yet. Only once an admin
+    // approves does the real refund get executed (writing the actual
+    // `refunds` row via the same processRefund logic administrators use
+    // for a direct refund). Declined requests never touch amount_paid,
+    // order status, loyalty points, or stock — nothing happens until
+    // there's a real approval.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS refund_requests (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        amount DECIMAL(10,2),
+        reason TEXT NOT NULL,
+        method VARCHAR(20),
+        restock BOOLEAN NOT NULL DEFAULT false,
+        is_void BOOLEAN NOT NULL DEFAULT false,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','declined')),
+        requested_by UUID REFERENCES users(id) ON DELETE SET NULL,
+        reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+        reviewed_at TIMESTAMP,
+        decline_reason TEXT,
+        refund_id UUID REFERENCES refunds(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');
   } catch (error) {

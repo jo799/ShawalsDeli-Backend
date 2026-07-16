@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import { deductInventoryForOrder, restockInventoryForOrder } from '../services/inventoryService';
 import { applyPaymentToOrder } from '../services/paymentservice';
 import { logAudit } from '../services/auditLog';
-import { notifyKitchenOfNewOrder } from '../services/pushService';
+import { notifyKitchenOfNewOrder, notifyAdminsOfRefundRequest } from '../services/pushService';
 
 
 // Timestamp slice alone can collide under concurrent load (two orders in
@@ -665,10 +665,21 @@ interface RefundParams {
 
 const REFUND_METHODS = ['cash', 'mpesa', 'card', 'store_credit'];
 
+type RefundResult =
+  | { ok: false; statusCode: number; message: string }
+  | {
+      ok: true;
+      refund: Record<string, unknown>;
+      orderStatus: string;
+      amountPaidRemaining: number;
+      pointsReversed: number;
+      restocked: boolean;
+      message: string;
+    };
+
 const processRefund = async (
-  res: Response,
   { orderId, amount, reason, method, restock, isVoid, performedBy, req }: RefundParams
-): Promise<void> => {
+): Promise<RefundResult> => {
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -678,43 +689,37 @@ const processRefund = async (
     const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
     if (orderRes.rows.length === 0) {
       await client.query('ROLLBACK');
-      res.status(404).json({ success: false, message: 'Order not found' });
-      return;
+      return { ok: false, statusCode: 404, message: 'Order not found' };
     }
     const order = orderRes.rows[0];
 
     if (order.status === 'awaiting_payment') {
       await client.query('ROLLBACK');
-      res.status(400).json({ success: false, message: 'This order has no confirmed payment yet. Cancel the pending payment instead of refunding.' });
-      return;
+      return { ok: false, statusCode: 400, message: 'This order has no confirmed payment yet. Cancel the pending payment instead of refunding.' };
     }
     if (order.status === 'cancelled') {
       await client.query('ROLLBACK');
-      res.status(400).json({ success: false, message: 'This order is already cancelled/voided.' });
-      return;
+      return { ok: false, statusCode: 400, message: 'This order is already cancelled/voided.' };
     }
 
     // amount_paid is already net of prior refunds, so it IS the refundable balance.
     const refundable = Math.round(Number(order.amount_paid) * 100) / 100;
     if (refundable <= 0) {
       await client.query('ROLLBACK');
-      res.status(400).json({ success: false, message: 'There is no paid amount to refund on this order.' });
-      return;
+      return { ok: false, statusCode: 400, message: 'There is no paid amount to refund on this order.' };
     }
 
     const requested = amount === undefined ? refundable : Math.round(Number(amount) * 100) / 100;
     if (!Number.isFinite(requested) || requested <= 0) {
       await client.query('ROLLBACK');
-      res.status(400).json({ success: false, message: 'Refund amount must be a positive number.' });
-      return;
+      return { ok: false, statusCode: 400, message: 'Refund amount must be a positive number.' };
     }
     if (requested - refundable > 0.01) {
       await client.query('ROLLBACK');
-      res.status(400).json({
-        success: false,
+      return {
+        ok: false, statusCode: 400,
         message: `Refund of KES ${requested.toFixed(2)} exceeds the refundable balance of KES ${refundable.toFixed(2)}.`,
-      });
-      return;
+      };
     }
 
     const refundMethod = method && REFUND_METHODS.includes(method) ? method : 'cash';
@@ -801,55 +806,277 @@ const processRefund = async (
       entityId: orderId,
       details: { order_number: order.order_number, amount: requested, reason: reason || null, method: refundMethod, restock, full_refund: isFullRefund },
     });
-    res.json({
-      success: true,
-      data: refundRow.rows[0],
-      order_status: isFullRefund ? 'cancelled' : order.status,
-      amount_paid_remaining: isFullRefund ? 0 : newAmountPaid,
-      points_reversed: pointsReversed,
+    return {
+      ok: true,
+      refund: refundRow.rows[0],
+      orderStatus: isFullRefund ? 'cancelled' : order.status,
+      amountPaidRemaining: isFullRefund ? 0 : newAmountPaid,
+      pointsReversed,
       restocked,
       message: isFullRefund
         ? `Full refund of KES ${requested.toFixed(2)} issued. Order voided.`
         : `Refund of KES ${requested.toFixed(2)} issued. KES ${newAmountPaid.toFixed(2)} still retained on the order.`,
-    });
+    };
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Refund error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    return { ok: false, statusCode: 500, message: 'Server error' };
   } finally {
     client.release();
   }
 };
 
-// POST /orders/:id/refund  { amount?, reason?, method?, restock? }
+// POST /orders/:id/refund  { amount?, reason, method?, restock? }
 export const refundOrder = async (req: AuthRequest, res: Response): Promise<void> => {
   const { amount, reason, method, restock } = req.body;
-  await processRefund(res, {
+  if (!reason || !String(reason).trim()) {
+    res.status(400).json({ success: false, message: 'A reason is required for every refund.' });
+    return;
+  }
+  const result = await processRefund({
     orderId: req.params.id,
     amount: amount === undefined || amount === null ? undefined : Number(amount),
-    reason,
+    reason: String(reason).trim(),
     method,
     restock: restock === true,
     isVoid: false,
     performedBy: req.user!.id,
     req,
   });
+  if (!result.ok) { res.status(result.statusCode).json({ success: false, message: result.message }); return; }
+  res.json({
+    success: true,
+    data: result.refund,
+    order_status: result.orderStatus,
+    amount_paid_remaining: result.amountPaidRemaining,
+    points_reversed: result.pointsReversed,
+    restocked: result.restocked,
+    message: result.message,
+  });
 };
 
-// POST /orders/:id/void  { reason?, restock? }
+// POST /orders/:id/void  { reason, restock? }
 // A void is a full refund of the remaining balance that cancels the order.
 // Restock defaults to TRUE here (a void generally means the sale shouldn't have
 // happened), but the caller can override.
 export const voidOrder = async (req: AuthRequest, res: Response): Promise<void> => {
   const { reason, method, restock } = req.body;
-  await processRefund(res, {
+  if (!reason || !String(reason).trim()) {
+    res.status(400).json({ success: false, message: 'A reason is required to void an order.' });
+    return;
+  }
+  const result = await processRefund({
     orderId: req.params.id,
     amount: undefined, // full balance
-    reason: reason || 'Order voided',
+    reason: String(reason).trim(),
     method,
     restock: restock === false ? false : true,
     isVoid: true,
     performedBy: req.user!.id,
     req,
   });
+  if (!result.ok) { res.status(result.statusCode).json({ success: false, message: result.message }); return; }
+  res.json({
+    success: true,
+    data: result.refund,
+    order_status: result.orderStatus,
+    amount_paid_remaining: result.amountPaidRemaining,
+    points_reversed: result.pointsReversed,
+    restocked: result.restocked,
+    message: result.message,
+  });
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// Refund approval workflow. Administrators refund directly via refundOrder/
+// voidOrder above (they're the approval authority — there's no one else to
+// check them). Managers go through this queue instead: a request moves no
+// money and changes nothing about the order until an admin explicitly
+// approves it.
+
+// POST /orders/:id/refund-request  { amount?, reason, method?, restock?, isVoid? }
+export const requestRefund = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { amount, reason, method, restock, isVoid } = req.body;
+    const orderId = req.params.id;
+
+    if (!reason || !String(reason).trim()) {
+      res.status(400).json({ success: false, message: 'A reason is required to request a refund.' });
+      return;
+    }
+
+    const orderRes = await query('SELECT id, order_number, status, amount_paid FROM orders WHERE id = $1', [orderId]);
+    if (orderRes.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+    const order = orderRes.rows[0];
+    if (order.status === 'awaiting_payment') {
+      res.status(400).json({ success: false, message: 'This order has no confirmed payment yet.' });
+      return;
+    }
+    if (order.status === 'cancelled') {
+      res.status(400).json({ success: false, message: 'This order is already cancelled/voided.' });
+      return;
+    }
+    const refundable = Math.round(Number(order.amount_paid) * 100) / 100;
+    if (refundable <= 0) {
+      res.status(400).json({ success: false, message: 'There is no paid amount to refund on this order.' });
+      return;
+    }
+    const requestedAmount = amount === undefined || amount === null ? null : Number(amount);
+    if (requestedAmount !== null && (!Number.isFinite(requestedAmount) || requestedAmount <= 0 || requestedAmount - refundable > 0.01)) {
+      res.status(400).json({ success: false, message: `Amount must be a positive number, at most the refundable balance of KES ${refundable.toFixed(2)}.` });
+      return;
+    }
+
+    const requestRow = await query(`
+      INSERT INTO refund_requests (order_id, amount, reason, method, restock, is_void, requested_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *
+    `, [orderId, requestedAmount, String(reason).trim(), method || null, restock === true, isVoid === true, req.user!.id]);
+
+    await logAudit(req, {
+      action: 'refund_requested',
+      entityType: 'order',
+      entityId: orderId,
+      details: { order_number: order.order_number, amount: requestedAmount ?? refundable, reason: String(reason).trim() },
+    });
+
+    const amountText = requestedAmount !== null ? `KES ${requestedAmount.toFixed(2)}` : 'the full amount';
+    notifyAdminsOfRefundRequest({
+      title: '🔔 Refund Request',
+      body: `Order #${order.order_number} — ${amountText} — "${String(reason).trim()}"`,
+      orderId,
+    }).catch(() => {}); // Never let a notification failure block the request itself.
+
+    res.status(201).json({
+      success: true,
+      data: requestRow.rows[0],
+      message: 'Refund request submitted — an administrator needs to approve it before anything is refunded.',
+    });
+  } catch (error) {
+    console.error('Request refund error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// GET /refund-requests?status=pending
+export const getRefundRequests = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const params: unknown[] = [];
+    let where = '';
+    if (status && ['pending', 'approved', 'declined'].includes(status)) {
+      params.push(status);
+      where = `WHERE rr.status = $${params.length}`;
+    }
+    const result = await query(`
+      SELECT rr.*, o.order_number, o.type as order_type, o.total as order_total,
+             req.full_name as requested_by_name, rev.full_name as reviewed_by_name
+      FROM refund_requests rr
+      JOIN orders o ON rr.order_id = o.id
+      LEFT JOIN users req ON rr.requested_by = req.id
+      LEFT JOIN users rev ON rr.reviewed_by = rev.id
+      ${where}
+      ORDER BY rr.status = 'pending' DESC, rr.created_at DESC
+      LIMIT 100
+    `, params);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Get refund requests error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// POST /refund-requests/:id/approve
+export const approveRefundRequest = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const reqRes = await query('SELECT * FROM refund_requests WHERE id = $1', [req.params.id]);
+    if (reqRes.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Refund request not found' });
+      return;
+    }
+    const reqRow = reqRes.rows[0];
+    if (reqRow.status !== 'pending') {
+      res.status(400).json({ success: false, message: `This request was already ${reqRow.status}.` });
+      return;
+    }
+
+    const result = await processRefund({
+      orderId: reqRow.order_id,
+      amount: reqRow.amount === null ? undefined : Number(reqRow.amount),
+      reason: reqRow.reason,
+      method: reqRow.method || undefined,
+      restock: reqRow.restock,
+      isVoid: reqRow.is_void,
+      performedBy: req.user!.id, // the refund is executed by the approving admin, not the original requester
+      req,
+    });
+
+    if (!result.ok) {
+      // Left 'pending' rather than auto-declined — the underlying issue
+      // (e.g. order state changed since the request was made) may be worth
+      // the admin investigating rather than the system silently deciding
+      // this request is dead.
+      res.status(result.statusCode).json({ success: false, message: `Could not approve: ${result.message}` });
+      return;
+    }
+
+    await query(`
+      UPDATE refund_requests SET status = 'approved', reviewed_by = $1, reviewed_at = CURRENT_TIMESTAMP, refund_id = $2
+      WHERE id = $3
+    `, [req.user!.id, (result.refund as { id: string }).id, reqRow.id]);
+
+    await logAudit(req, {
+      action: 'refund_request_approved',
+      entityType: 'order',
+      entityId: reqRow.order_id,
+      details: { refund_request_id: reqRow.id, requested_by: reqRow.requested_by },
+    });
+
+    res.json({
+      success: true,
+      data: result.refund,
+      order_status: result.orderStatus,
+      amount_paid_remaining: result.amountPaidRemaining,
+      message: `Approved. ${result.message}`,
+    });
+  } catch (error) {
+    console.error('Approve refund request error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// POST /refund-requests/:id/decline  { decline_reason? }
+export const declineRefundRequest = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { decline_reason } = req.body;
+    const reqRes = await query('SELECT * FROM refund_requests WHERE id = $1', [req.params.id]);
+    if (reqRes.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Refund request not found' });
+      return;
+    }
+    const reqRow = reqRes.rows[0];
+    if (reqRow.status !== 'pending') {
+      res.status(400).json({ success: false, message: `This request was already ${reqRow.status}.` });
+      return;
+    }
+
+    await query(`
+      UPDATE refund_requests SET status = 'declined', reviewed_by = $1, reviewed_at = CURRENT_TIMESTAMP, decline_reason = $2
+      WHERE id = $3
+    `, [req.user!.id, decline_reason ? String(decline_reason).trim() : null, reqRow.id]);
+
+    await logAudit(req, {
+      action: 'refund_request_declined',
+      entityType: 'order',
+      entityId: reqRow.order_id,
+      details: { refund_request_id: reqRow.id, requested_by: reqRow.requested_by, decline_reason: decline_reason || null },
+    });
+
+    res.json({ success: true, message: 'Refund request declined. Nothing was refunded.' });
+  } catch (error) {
+    console.error('Decline refund request error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
 };

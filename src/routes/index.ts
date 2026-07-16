@@ -7,6 +7,7 @@ import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, de
 import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, redeemPoints, adjustPoints } from '../controllers/customersController';
 import { getLoyaltyStats, getLoyaltyTiers, updatePointValue } from '../controllers/loyaltyController';
 import { getDailyReport, getSummaryReport } from '../controllers/reportsController';
+import { exportSalesReport } from '../controllers/salesReportController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
 import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule } from '../controllers/staffController';
 import { getTables, updateTableStatus, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
@@ -94,6 +95,7 @@ router.put('/loyalty/point-value', authenticate, authorize('administrator', 'man
 // Reports
 router.get('/reports/daily', authenticate, getDailyReport);
 router.get('/reports/summary', authenticate, getSummaryReport);
+router.get('/reports/sales-export', authenticate, exportSalesReport);
 
 // Expenses
 router.get('/expenses', authenticate, getExpenses);

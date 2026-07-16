@@ -117,7 +117,7 @@ export const applyPaymentToOrder = async (
       orderId: updatedOrder.id,
       orderNumber: updatedOrder.order_number,
     }).catch(() => {}); // Never let a notification failure affect payment processing.
-    
+   
   }
 
   // Deduct stock whenever a payment is successfully applied. Always safe to

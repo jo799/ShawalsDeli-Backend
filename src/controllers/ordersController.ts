@@ -71,7 +71,8 @@ export const getOrders = async (req: Request, res: Response): Promise<void> => {
     params.push(Number(limit), offset);
     const result = await query(`
       SELECT o.*, t.table_number, c.full_name as customer_full_name,
-             u.full_name as served_by_name, p.full_name as prepared_by_name
+             u.full_name as served_by_name, p.full_name as prepared_by_name,
+             EXISTS(SELECT 1 FROM refunds r WHERE r.order_id = o.id) as has_refund
       FROM orders o
       LEFT JOIN restaurant_tables t ON o.table_id = t.id
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -306,7 +307,7 @@ export const createOrder = async (req: AuthRequest, res: Response): Promise<void
         orderId: order.id,
         orderNumber: order.order_number,
       }).catch(() => {}); // Never let a notification failure affect the order response.
-     
+      
     }
 
     res.status(201).json({

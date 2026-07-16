@@ -1,5 +1,7 @@
 import { PoolClient } from 'pg';
 import { deductInventoryForOrder, StockShortfall } from './inventoryService';
+import { notifyKitchenOfNewOrder } from './pushService';
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Single source of truth for "apply a payment to an order" — used by BOTH the
@@ -84,44 +86,38 @@ export const applyPaymentToOrder = async (
   const wasAwaitingPayment = order.status === 'awaiting_payment';
   const newAmountPaid = Math.round((currentPaid + amount) * 100) / 100;
   const isFullyPaid = newAmountPaid >= total - 0.01;
-  const isInstantCompleteType = order.type === 'takeaway' || order.type === 'delivery';
 
-  // Unified status rule (this is the piece that used to differ between the
-  // two payment paths):
-  //   - First payment received on an order that was waiting on one (partial
-  //     or full) releases it out of 'awaiting_payment' — into 'completed'
-  //     immediately for takeaway/delivery once fully paid, otherwise into
-  //     'new' so it enters the normal kitchen flow exactly like a cash order
-  //     does today (which starts 'new' with zero collected).
-  //   - A later top-up payment that completes an already-'new' order only
-  //     matters for takeaway/delivery, which jump to 'completed' the moment
-  //     the balance clears.
-  //   - Dine-in orders that are already 'new'/'preparing'/'ready' are
-  //     unaffected by payment — they complete via the kitchen workflow, not
-  //     via money.
+  // Unified status rule — every order type (dine-in, takeaway, delivery)
+  // follows the exact same path: the first payment that clears the
+  // balance releases an order out of 'awaiting_payment' and into 'new',
+  // entering the normal kitchen queue. Food for takeaway/delivery still
+  // has to be cooked — there's no reason paying in full should skip the
+  // kitchen entirely, and Kitchen Display's own "Mark Served" button
+  // already completes any order type once it's actually ready, so that's
+  // the one and only path to 'completed' for every type now, not a
+  // type-specific shortcut here.
   let newStatus: string = order.status;
-  if (wasAwaitingPayment) {
-    newStatus = isFullyPaid && isInstantCompleteType ? 'completed' : 'new';
-  } else if (isFullyPaid && isInstantCompleteType && order.status !== 'completed') {
-    newStatus = 'completed';
+  if (wasAwaitingPayment && isFullyPaid) {
+    newStatus = 'new';
   }
-  const willCompleteNow = newStatus === 'completed' && order.status !== 'completed';
 
   const updateRes = await client.query(
-    `UPDATE orders
-       SET amount_paid = $1, status = $2,
-           completed_at = CASE WHEN $3 THEN CURRENT_TIMESTAMP ELSE completed_at END,
-           updated_at = CURRENT_TIMESTAMP
-     WHERE id = $4 RETURNING *`,
-    [newAmountPaid, newStatus, willCompleteNow, orderId]
+    `UPDATE orders SET amount_paid = $1, status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`,
+    [newAmountPaid, newStatus, orderId]
   );
   const updatedOrder = updateRes.rows[0];
 
-  if (willCompleteNow && updatedOrder.table_id) {
-    await client.query(
-      `UPDATE restaurant_tables SET status = 'available', current_order_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-      [updatedOrder.table_id]
-    );
+  if (wasAwaitingPayment && newStatus === 'new') {
+    const itemCountRes = await client.query('SELECT COUNT(*) FROM order_items WHERE order_id = $1', [orderId]);
+    const itemCount = parseInt(itemCountRes.rows[0].count, 10);
+    const orderSummary = `Order #${updatedOrder.order_number} — ${itemCount} item${itemCount !== 1 ? 's' : ''}${updatedOrder.table_id ? ' · Dine In' : ''}`;
+    notifyKitchenOfNewOrder({
+      title: '🔔 New Order',
+      body: orderSummary,
+      orderId: updatedOrder.id,
+      orderNumber: updatedOrder.order_number,
+    }).catch(() => {}); // Never let a notification failure affect payment processing.
+    
   }
 
   // Deduct stock whenever a payment is successfully applied. Always safe to
@@ -160,7 +156,7 @@ export const applyPaymentToOrder = async (
       [orderId]
     );
     const earningBasis = Math.max(0, total - Number(pointsTenderRes.rows[0].total) - currentPointsTenderAmount);
-    const points = Math.floor(Math.round(earningBasis * 100) / 1000); // 1000 cents = KES 10 = 1 point
+    const points = Math.floor(Math.round(earningBasis * 100) / 10000); // 10000 cents = KES 100 = 1 point (matches typical Kenyan supermarket loyalty rates)
     if (points > 0) {
       await client.query(
         `INSERT INTO loyalty_points (customer_id, total_points, available_points)
@@ -186,7 +182,7 @@ export const applyPaymentToOrder = async (
     order: updatedOrder,
     isFullyPaid,
     balanceRemaining: Math.max(0, Math.round((total - newAmountPaid) * 100) / 100),
-    newlyCompleted: willCompleteNow,
+    newlyCompleted: false, // Completion now only ever happens via Kitchen Display's "Mark Served", never as a side effect of payment.
     stockWarnings: deduction.shortfalls,
     pointsAwarded,
   };

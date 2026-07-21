@@ -34,7 +34,14 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Security
-app.use(helmet());
+// Cross-Origin-Resource-Policy defaults to 'same-origin' under helmet,
+// which silently blocks the BROWSER from actually displaying anything
+// this server returns (menu images, receipts, sick-off documents) once
+// requested from a different origin — even though the HTTP request itself
+// still succeeds with a 200. That's exactly this app's real deployment
+// shape: frontend and backend are two separate Railway services on two
+// separate domains by design, not an accident to lock down against.
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',
   credentials: true,

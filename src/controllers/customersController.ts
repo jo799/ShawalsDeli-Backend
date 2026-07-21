@@ -5,7 +5,7 @@ import { logAudit } from '../services/auditLog';
 
 export const getCustomers = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { search, status, tier, page = 1, limit = 10 } = req.query;
+    const { search, status, tier, include_growth, page = 1, limit = 10 } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -52,7 +52,35 @@ export const getCustomers = async (req: Request, res: Response): Promise<void> =
       LIMIT $${limitIdx} OFFSET $${offsetIdx}
     `, params);
 
-    res.json({ success: true, data: result.rows, pagination: { total: parseInt(countRes.rows[0].count), page: Number(page), limit: Number(limit) } });
+    // Optional, opt-in — genuinely new sign-ups this month vs last month.
+    // "Active Customers" is a running total, not something a day-to-day
+    // trend naturally applies to (it barely moves unless customers are
+    // actually being deactivated), so the meaningful comparison here is
+    // growth in new customers, not the total itself. Gated behind
+    // include_growth so the extra query doesn't run on every listing call
+    // the Customers page itself makes.
+    let growth: { new_this_month: number; new_last_month: number; change_pct: number | null } | undefined;
+    if (include_growth === 'true') {
+      const growthRes = await query(`
+        SELECT
+          COUNT(*) FILTER (WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)) as this_month,
+          COUNT(*) FILTER (WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')) as last_month
+        FROM customers
+      `);
+      const thisMonth = parseInt(growthRes.rows[0].this_month);
+      const lastMonth = parseInt(growthRes.rows[0].last_month);
+      growth = {
+        new_this_month: thisMonth,
+        new_last_month: lastMonth,
+        change_pct: lastMonth > 0 ? Math.round(((thisMonth - lastMonth) / lastMonth) * 100) : (thisMonth > 0 ? null : 0),
+      };
+    }
+
+    res.json({
+      success: true, data: result.rows,
+      pagination: { total: parseInt(countRes.rows[0].count), page: Number(page), limit: Number(limit) },
+      ...(growth ? { growth } : {}),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });

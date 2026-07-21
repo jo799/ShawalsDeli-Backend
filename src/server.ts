@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 import routes from './routes';
 import { errorHandler, notFound } from './middleware/errorHandler';
 import { sweepExpiredMpesaPayments } from './controllers/mpesaController';
+import { stripeWebhook } from './controllers/stripeController';
 
 dotenv.config();
 
@@ -33,30 +34,9 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Security
-// helmet's default Cross-Origin-Resource-Policy is 'same-origin' — a good
-// default when a single app serves everything from one place, but this one
-// deliberately doesn't: the frontend and backend are separate Railway
-// services on separate origins, and the frontend needs to display images
-// (menu photos, receipts) that only the backend serves from /uploads.
-// Without this override, the browser blocks those images from rendering
-// even though the request itself succeeds (a 200 that still won't display
-// — the request 'worked', the browser just refuses to use the response).
-// 'cross-origin' is the right choice specifically because /uploads only
-// ever holds public-facing images with nothing confidential in them.
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
-}));
-// .replace(/\/$/, '') strips a trailing slash if present — browsers match
-// Access-Control-Allow-Origin against the request's Origin header with
-// exact string equality, so 'https://example.com/' and 'https://example.com'
-// are treated as genuinely different origins and the request gets silently
-// blocked, even though they're obviously "the same" domain to a human. A
-// trailing slash on FRONTEND_URL is an extremely easy thing to type by
-// habit (many people add one automatically), so this normalizes it instead
-// of relying on it being entered exactly right.
-const FRONTEND_ORIGIN = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+app.use(helmet());
 app.use(cors({
-  origin: FRONTEND_ORIGIN,
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
   credentials: true,
 }));
 
@@ -133,6 +113,12 @@ app.use('/api/auth/verify-otp', rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 }));
+
+// Stripe webhook signature verification needs the raw, unparsed request
+// body — mounted here, before the global express.json() below, so this
+// exact route sees the original bytes rather than an already-parsed (and
+// therefore no longer byte-identical) JSON object.
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhook);
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));

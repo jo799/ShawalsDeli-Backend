@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { login, register, forgotPassword, verifyResetOtp, resetPassword, getProfile, changePassword, verifyLoginOtp, getSystemStatus, setupFirstAdmin } from '../controllers/authController';
-import { getOrders, getOrderById, createOrder, updateOrderStatus, processPayment, cancelPendingPayment, refundOrder, voidOrder, getOrderStats, requestRefund, getRefundRequests, approveRefundRequest, declineRefundRequest } from '../controllers/ordersController';
+import { getOrders, getOrderById, createOrder, updateOrderStatus, processPayment, cancelPendingPayment, refundOrder, voidOrder, getOrderStats, requestRefund, getRefundRequests, approveRefundRequest, declineRefundRequest, assignOrderToChef } from '../controllers/ordersController';
 import { getMenuItems, getCategories, createCategory, updateCategory, deleteCategory, createMenuItem, updateMenuItem, deleteMenuItem, getRecipe, setRecipe, getMenuItemByBarcode } from '../controllers/menuController';
 import { uploadMenuImage } from '../controllers/uploadController';
 import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock } from '../controllers/inventoryController';
@@ -56,6 +56,7 @@ router.post('/orders/:id/refund-request', authenticate, authorize('administrator
 router.get('/refund-requests', authenticate, authorize('administrator'), getRefundRequests);
 router.post('/refund-requests/:id/approve', authenticate, authorize('administrator'), approveRefundRequest);
 router.post('/refund-requests/:id/decline', authenticate, authorize('administrator'), declineRefundRequest);
+router.post('/orders/:id/assign-chef', authenticate, authorize('administrator'), assignOrderToChef);
 
 // Menu
 router.get('/menu/items', authenticate, getMenuItems);

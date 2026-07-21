@@ -34,10 +34,26 @@ async function computeSummary(startDate: string, endDate: string) {
     WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND o.status = 'completed'
   `, [startDate, endDate]);
 
+  // Real operating expenses for the same window — rent, utilities, supplies
+  // bought outside a tracked purchase order, anything logged on the
+  // Expenses page. Gross profit alone (revenue minus recipe cost) was the
+  // only profit figure this system ever produced; it answers "did the food
+  // itself make money" but not "did the business make money", which needs
+  // these subtracted too. expense_date (not created_at) is the column that
+  // actually means "when this expense happened", matching how the Expenses
+  // page itself already filters.
+  const expensesRes = await query(`
+    SELECT COALESCE(SUM(amount), 0) as total_expenses
+    FROM expenses
+    WHERE expense_date BETWEEN $1 AND $2
+  `, [startDate, endDate]);
+
   const stats = salesRes.rows[0];
   const cogs = parseFloat(cogsRes.rows[0].cogs);
   const net_sales = parseFloat(stats.net_sales);
   const gross_profit = net_sales - cogs;
+  const total_expenses = parseFloat(expensesRes.rows[0].total_expenses);
+  const net_profit = gross_profit - total_expenses;
 
   return {
     total_sales: parseFloat(stats.total_sales),
@@ -48,6 +64,9 @@ async function computeSummary(startDate: string, endDate: string) {
     cogs,
     gross_profit,
     gross_profit_margin: net_sales > 0 ? Math.round((gross_profit / net_sales) * 100) : 0,
+    total_expenses,
+    net_profit,
+    net_profit_margin: net_sales > 0 ? Math.round((net_profit / net_sales) * 100) : 0,
   };
 }
 
@@ -163,6 +182,7 @@ export const getSummaryReport = async (req: Request, res: Response): Promise<voi
           total_orders_change_pct: pctChange(summary.total_orders, prevSummary.total_orders),
           avg_order_value_change_pct: pctChange(summary.avg_order_value, prevSummary.avg_order_value),
           gross_profit_change_pct: pctChange(summary.gross_profit, prevSummary.gross_profit),
+          net_profit_change_pct: pctChange(summary.net_profit, prevSummary.net_profit),
         },
         by_category: categoryRes.rows.map(r => ({ category: r.category, sales: parseFloat(r.sales) || 0, qty: parseInt(r.qty) || 0 })),
         by_payment: paymentRes.rows.map(r => ({ payment_method: r.payment_method, amount: parseFloat(r.amount) || 0, count: parseInt(r.count) || 0 })),

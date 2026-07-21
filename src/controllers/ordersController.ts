@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import { deductInventoryForOrder, restockInventoryForOrder } from '../services/inventoryService';
 import { applyPaymentToOrder } from '../services/paymentservice';
 import { logAudit } from '../services/auditLog';
-import { notifyKitchenOfNewOrder, notifyAdminsOfRefundRequest } from '../services/pushService';
+import { notifyKitchenOfNewOrder, notifyAdminsOfRefundRequest, notifyChefOfAssignment } from '../services/pushService';
 
 
 // Timestamp slice alone can collide under concurrent load (two orders in
@@ -71,8 +71,7 @@ export const getOrders = async (req: Request, res: Response): Promise<void> => {
     params.push(Number(limit), offset);
     const result = await query(`
       SELECT o.*, t.table_number, c.full_name as customer_full_name,
-             u.full_name as served_by_name, p.full_name as prepared_by_name,
-             EXISTS(SELECT 1 FROM refunds r WHERE r.order_id = o.id) as has_refund
+             u.full_name as served_by_name, p.full_name as prepared_by_name
       FROM orders o
       LEFT JOIN restaurant_tables t ON o.table_id = t.id
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -1078,6 +1077,82 @@ export const declineRefundRequest = async (req: AuthRequest, res: Response): Pro
     res.json({ success: true, message: 'Refund request declined. Nothing was refunded.' });
   } catch (error) {
     console.error('Decline refund request error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// POST /orders/:id/assign-chef  { chef_id }
+//
+// Distinct from the existing "Start Preparing" flow above (which sets
+// prepared_by via COALESCE — only if nobody's claimed it yet, and only the
+// person who physically clicks it). This is an admin *directing* a
+// specific chef to a specific order sitting unattended, which is a
+// deliberate assignment, not a claim — so it overwrites prepared_by
+// outright rather than only filling it if empty. Status is deliberately
+// left untouched: the order stays exactly where it is in the queue (still
+// 'new', or wherever it already was); only who's responsible for it
+// changes. The chef still needs to tap "Start Preparing" themselves once
+// they've seen the notification — an admin can point at who should pick an
+// order up, but shouldn't be able to silently start the clock on someone
+// else's behalf.
+export const assignOrderToChef = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { chef_id } = req.body;
+    const orderId = req.params.id;
+
+    if (!chef_id) {
+      res.status(400).json({ success: false, message: 'chef_id is required' });
+      return;
+    }
+
+    const orderRes = await query('SELECT id, order_number, status FROM orders WHERE id = $1', [orderId]);
+    if (orderRes.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+    const order = orderRes.rows[0];
+    if (!['new', 'preparing'].includes(order.status)) {
+      res.status(400).json({ success: false, message: `Cannot assign a chef to an order that is already ${order.status}.` });
+      return;
+    }
+
+    // Only a genuine kitchen role can be assigned — assigning "the chef"
+    // for a dish to, say, a cashier account wouldn't mean anything.
+    const chefRes = await query(`
+      SELECT id, full_name FROM users
+      WHERE id = $1 AND role IN ('kitchen_staff', 'head_chef') AND status = 'active'
+    `, [chef_id]);
+    if (chefRes.rows.length === 0) {
+      res.status(400).json({ success: false, message: 'chef_id must be an active kitchen staff member or head chef.' });
+      return;
+    }
+    const chef = chefRes.rows[0];
+
+    const updateRes = await query(
+      `UPDATE orders SET prepared_by = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
+      [chef_id, orderId]
+    );
+
+    await logAudit(req, {
+      action: 'order_assigned_to_chef',
+      entityType: 'order',
+      entityId: orderId,
+      details: { order_number: order.order_number, assigned_to: chef.full_name, chef_id },
+    });
+
+    notifyChefOfAssignment(chef_id, {
+      title: '🔔 Order Assigned To You',
+      body: `Order #${order.order_number} has been assigned to you — please attend to it.`,
+      orderId,
+    }).catch(() => {}); // Never let a notification failure block the assignment itself.
+
+    res.json({
+      success: true,
+      data: updateRes.rows[0],
+      message: `Order #${order.order_number} assigned to ${chef.full_name}.`,
+    });
+  } catch (error) {
+    console.error('Assign chef error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

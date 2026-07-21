@@ -217,23 +217,39 @@ export const receivePurchaseOrder = async (req: AuthRequest, res: Response): Pro
       await client.query('UPDATE purchase_order_items SET quantity_received = $1 WHERE id = $2', [newReceived, poItem.id]);
       anyReceived = true;
 
-      // Credit inventory only if this line is actually linked to a real
-      // inventory item — a PO line typed in as free text (no inventory_item_id)
-      // has nothing to credit, and that's fine: receiving still records the
-      // delivery on the PO itself, it just can't move a stock count that
-      // isn't tracked anywhere.
-      if (poItem.inventory_item_id) {
-        const invRes = await client.query('SELECT * FROM inventory_items WHERE id = $1 AND is_active = true FOR UPDATE', [poItem.inventory_item_id]);
-        if (invRes.rows.length > 0) {
-          const invItem = invRes.rows[0];
-          const before = Number(invItem.quantity);
-          const after = Math.round((before + qtyNow) * 1000) / 1000;
-          await client.query('UPDATE inventory_items SET quantity = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [after, invItem.id]);
-          await client.query(`
-            INSERT INTO inventory_transactions (inventory_item_id, type, quantity_change, quantity_before, quantity_after, notes, reference_id, performed_by)
-            VALUES ($1, 'purchase', $2, $3, $4, $5, $6, $7)
-          `, [invItem.id, qtyNow, before, after, `Received from PO ${po.po_number}`, id, req.user!.id]);
-        }
+      // Credit inventory if this line is linked to a real inventory item —
+      // and if it ISN'T (a line typed in as free text, with nothing in
+      // inventory to credit), auto-create one from the line itself rather
+      // than silently recording the delivery on the PO with no effect on
+      // stock anywhere. This is exactly the case of buying something new:
+      // there was nothing to link to yet because the item didn't exist in
+      // inventory before this purchase. The PO line is then linked back to
+      // the newly-created item, so if the rest of this line arrives in a
+      // later, separate delivery, it credits the same inventory item
+      // instead of creating a second, duplicate one.
+      let inventoryItemId = poItem.inventory_item_id as string | null;
+
+      if (!inventoryItemId) {
+        const skuBase = String(poItem.item_name).toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'ITEM';
+        const sku = `${skuBase}-${Date.now().toString().slice(-6)}`;
+        const newItem = await client.query(`
+          INSERT INTO inventory_items (sku, name, unit, quantity, cost_per_unit, reorder_level, is_active)
+          VALUES ($1, $2, $3, 0, $4, 0, true) RETURNING id
+        `, [sku, poItem.item_name, poItem.unit, poItem.unit_price]);
+        inventoryItemId = newItem.rows[0].id;
+        await client.query('UPDATE purchase_order_items SET inventory_item_id = $1 WHERE id = $2', [inventoryItemId, poItem.id]);
+      }
+
+      const invRes = await client.query('SELECT * FROM inventory_items WHERE id = $1 AND is_active = true FOR UPDATE', [inventoryItemId]);
+      if (invRes.rows.length > 0) {
+        const invItem = invRes.rows[0];
+        const before = Number(invItem.quantity);
+        const after = Math.round((before + qtyNow) * 1000) / 1000;
+        await client.query('UPDATE inventory_items SET quantity = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [after, invItem.id]);
+        await client.query(`
+          INSERT INTO inventory_transactions (inventory_item_id, type, quantity_change, quantity_before, quantity_after, notes, reference_id, performed_by)
+          VALUES ($1, 'purchase', $2, $3, $4, $5, $6, $7)
+        `, [invItem.id, qtyNow, before, after, `Received from PO ${po.po_number}`, id, req.user!.id]);
       }
     }
 

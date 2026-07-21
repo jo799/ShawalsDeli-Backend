@@ -26,6 +26,34 @@ interface PushPayload {
   url: string;
 }
 
+// Actually delivers to a given set of push_subscriptions rows, and cleans
+// up any subscription the browser itself has reported as dead (404/410)
+// rather than retrying it forever. Shared by both the role-based and
+// single-user senders below, so there's exactly one place that knows how
+// to talk to web-push and handle its failures.
+const deliverToSubscriptions = async (
+  subs: Array<{ id: string; endpoint: string; subscription: webpush.PushSubscription }>,
+  payload: PushPayload
+): Promise<void> => {
+  await Promise.all(subs.map(async (row) => {
+    try {
+      await webpush.sendNotification(row.subscription, JSON.stringify({
+        title: payload.title,
+        body: payload.body,
+        tag: payload.tag,
+        data: { url: payload.url },
+      }));
+    } catch (err: unknown) {
+      const statusCode = (err as { statusCode?: number })?.statusCode;
+      if (statusCode === 404 || statusCode === 410) {
+        await query('DELETE FROM push_subscriptions WHERE id = $1', [row.id]).catch(() => {});
+      } else {
+        console.error('Push notification failed for subscription', row.id, err);
+      }
+    }
+  }));
+};
+
 // Shared delivery mechanism behind every notification type this app sends.
 // Looks up every device subscribed by someone in one of the given roles,
 // sends to all of them (a person can reasonably have more than one
@@ -43,30 +71,33 @@ const sendPushToRoles = async (roles: string[], payload: PushPayload): Promise<v
       JOIN users u ON ps.user_id = u.id
       WHERE u.role = ANY($1) AND u.status = 'active'
     `, [roles]);
-
-    await Promise.all(subs.rows.map(async (row) => {
-      try {
-        await webpush.sendNotification(row.subscription, JSON.stringify({
-          title: payload.title,
-          body: payload.body,
-          tag: payload.tag,
-          data: { url: payload.url },
-        }));
-      } catch (err: unknown) {
-        const statusCode = (err as { statusCode?: number })?.statusCode;
-        if (statusCode === 404 || statusCode === 410) {
-          await query('DELETE FROM push_subscriptions WHERE id = $1', [row.id]).catch(() => {});
-        } else {
-          console.error('Push notification failed for subscription', row.id, err);
-        }
-      }
-    }));
+    await deliverToSubscriptions(subs.rows, payload);
   } catch (error) {
     // A notification failure should never prevent whatever triggered it
     // (an order, a refund request) from succeeding — this is a
     // nice-to-have alert layered on top of a working flow, not a
     // dependency of it.
     console.error('sendPushToRoles error:', error);
+  }
+};
+
+// Same delivery mechanism, but targeted at exactly one person by user id —
+// for notifications that are inherently about a specific individual (e.g.
+// "this order was assigned to YOU"), where sending to an entire role would
+// be wrong: the rest of the kitchen has no reason to be notified about
+// someone else's personal assignment.
+const sendPushToUser = async (userId: string, payload: PushPayload): Promise<void> => {
+  if (!configured) return;
+  try {
+    const subs = await query(`
+      SELECT ps.id, ps.endpoint, ps.subscription
+      FROM push_subscriptions ps
+      JOIN users u ON ps.user_id = u.id
+      WHERE ps.user_id = $1 AND u.status = 'active'
+    `, [userId]);
+    await deliverToSubscriptions(subs.rows, payload);
+  } catch (error) {
+    console.error('sendPushToUser error:', error);
   }
 };
 
@@ -100,4 +131,18 @@ export const notifyAdminsOfRefundRequest = async (payload: RefundRequestNotifica
     ['administrator'],
     { title: payload.title, body: payload.body, tag: `refund-${payload.orderId}`, url: '/orders' }
   );
+};
+
+interface ChefAssignmentNotificationPayload {
+  title: string;
+  body: string;
+  orderId: string;
+}
+
+// A specific order was manually assigned to a specific chef by an admin —
+// only that one person should be notified, not the whole kitchen (they'd
+// otherwise get a duplicate, irrelevant alert on top of the new-order
+// notification everyone already received when the order first came in).
+export const notifyChefOfAssignment = async (chefUserId: string, payload: ChefAssignmentNotificationPayload): Promise<void> => {
+  await sendPushToUser(chefUserId, { title: payload.title, body: payload.body, tag: `assignment-${payload.orderId}`, url: '/kitchen' });
 };

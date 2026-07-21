@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import ExcelJS from 'exceljs';
 import { query } from '../config/database';
 
 // Every DATE(created_at) / GROUP BY DATE(created_at) / EXTRACT(HOUR FROM
@@ -213,4 +214,132 @@ export const getDailyReport = async (req: Request, res: Response): Promise<void>
   const date = String(req.query.date || new Date().toISOString().slice(0, 10));
   req.query = { start_date: date, end_date: date };
   return getSummaryReport(req, res);
+};
+
+// GET /reports/financial-summary-export?period=today|week|month|year  (or start_date=&end_date=)
+//
+// A real .xlsx workbook covering how expenses and purchases actually
+// connect to profitability — the thing missing before was that Purchases
+// and Expenses were each just their own itemized list with no way to see
+// how they add up against what was actually sold. Three sheets: the
+// headline Financial Summary (reusing computeSummary directly rather than
+// recomputing the same numbers a second time, so this can never drift from
+// what Reports itself shows), then itemized Expenses and Purchases detail
+// for the same period.
+export const exportFinancialSummary = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { period, start_date, end_date } = req.query as { period?: string; start_date?: string; end_date?: string };
+
+    let startDate: string; let endDate: string; let periodLabel: string;
+    if (start_date && end_date) {
+      startDate = start_date; endDate = end_date;
+      periodLabel = `${start_date} to ${end_date}`;
+    } else {
+      const p = period === 'week' || period === 'month' || period === 'year' ? period : 'day';
+      const rangeRes = await query(`SELECT DATE_TRUNC('${p}', CURRENT_TIMESTAMP)::date as start_d, CURRENT_DATE as end_d`);
+      startDate = rangeRes.rows[0].start_d.toISOString().slice(0, 10);
+      endDate = rangeRes.rows[0].end_d.toISOString().slice(0, 10);
+      periodLabel = { day: 'Today', week: 'This Week', month: 'This Month', year: 'This Year' }[p]!;
+    }
+
+    const summary = await computeSummary(startDate, endDate);
+
+    const purchasesRes = await query(`
+      SELECT po.po_number, po.order_date, po.status, po.total_amount, s.name as supplier_name
+      FROM purchase_orders po
+      LEFT JOIN suppliers s ON po.supplier_id = s.id
+      WHERE po.order_date BETWEEN $1 AND $2
+      ORDER BY po.order_date DESC
+    `, [startDate, endDate]);
+    const totalPurchasesSpend = purchasesRes.rows.reduce((sum, r) => sum + Number(r.total_amount), 0);
+
+    const expensesRes = await query(`
+      SELECT e.title, ec.name as category_name, e.vendor, e.expense_date, e.payment_method, e.amount
+      FROM expenses e
+      LEFT JOIN expense_categories ec ON e.category_id = ec.id
+      WHERE e.expense_date BETWEEN $1 AND $2
+      ORDER BY e.expense_date DESC
+    `, [startDate, endDate]);
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "Shawal's Deli POS";
+    workbook.created = new Date();
+
+    // ── Sheet 1: Financial Summary ──────────────────────────────────────
+    const summarySheet = workbook.addWorksheet('Financial Summary');
+    summarySheet.columns = [{ header: 'Metric', key: 'metric', width: 32 }, { header: 'Value', key: 'value', width: 20 }];
+    summarySheet.getRow(1).font = { bold: true };
+    summarySheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3A712' } };
+    summarySheet.addRow({ metric: `Period: ${periodLabel} (${startDate} to ${endDate})`, value: '' });
+    summarySheet.addRow({});
+    const summaryRows = [
+      ['Total Sales', summary.total_sales],
+      ['Discounts', -summary.total_discounts],
+      ['Net Sales', summary.net_sales],
+      ['Cost of Goods Sold (COGS)', -summary.cogs],
+      ['Gross Profit', summary.gross_profit],
+      ['Gross Profit Margin', `${summary.gross_profit_margin}%`],
+      ['Total Operating Expenses', -summary.total_expenses],
+      ['Net Profit', summary.net_profit],
+      ['Net Profit Margin', `${summary.net_profit_margin}%`],
+      [],
+      ['Total Purchases Spend (stock bought this period)', totalPurchasesSpend],
+    ];
+    summaryRows.forEach(row => {
+      if (row.length === 0) { summarySheet.addRow({}); return; }
+      const [metric, value] = row;
+      const r = summarySheet.addRow({ metric, value: typeof value === 'number' ? value : value });
+      if (typeof value === 'number') r.getCell('value').numFmt = '#,##0.00';
+      if (metric === 'Net Profit' || metric === 'Gross Profit') r.font = { bold: true };
+    });
+
+    // ── Sheet 2: Expenses Detail ─────────────────────────────────────────
+    const expSheet = workbook.addWorksheet('Expenses Detail');
+    expSheet.columns = [
+      { header: 'Date', key: 'date', width: 12 }, { header: 'Title', key: 'title', width: 28 },
+      { header: 'Category', key: 'category', width: 18 }, { header: 'Vendor', key: 'vendor', width: 20 },
+      { header: 'Payment Method', key: 'payment_method', width: 16 }, { header: 'Amount (KES)', key: 'amount', width: 14 },
+    ];
+    expSheet.getRow(1).font = { bold: true };
+    expSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3A712' } };
+    expensesRes.rows.forEach(e => expSheet.addRow({
+      date: new Date(e.expense_date).toLocaleDateString('en-KE', { day: '2-digit', month: 'short', year: 'numeric' }),
+      title: e.title, category: e.category_name || '—', vendor: e.vendor || '—',
+      payment_method: e.payment_method ? e.payment_method.toUpperCase() : '—', amount: Number(e.amount),
+    }));
+    expSheet.getColumn('amount').numFmt = '#,##0.00';
+    if (expensesRes.rows.length > 0) {
+      const t = expSheet.addRow({ title: 'TOTAL', amount: summary.total_expenses });
+      t.font = { bold: true }; t.getCell('amount').numFmt = '#,##0.00'; t.border = { top: { style: 'thin' } };
+    }
+
+    // ── Sheet 3: Purchases Detail ────────────────────────────────────────
+    const poSheet = workbook.addWorksheet('Purchases Detail');
+    poSheet.columns = [
+      { header: 'Date', key: 'date', width: 12 }, { header: 'PO Number', key: 'po_number', width: 18 },
+      { header: 'Supplier', key: 'supplier', width: 24 }, { header: 'Status', key: 'status', width: 14 },
+      { header: 'Total (KES)', key: 'total', width: 14 },
+    ];
+    poSheet.getRow(1).font = { bold: true };
+    poSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3A712' } };
+    purchasesRes.rows.forEach(p => poSheet.addRow({
+      date: new Date(p.order_date).toLocaleDateString('en-KE', { day: '2-digit', month: 'short', year: 'numeric' }),
+      po_number: p.po_number, supplier: p.supplier_name || '—',
+      status: (p.status as string).replace('_', ' '), total: Number(p.total_amount),
+    }));
+    poSheet.getColumn('total').numFmt = '#,##0.00';
+    if (purchasesRes.rows.length > 0) {
+      const t = poSheet.addRow({ po_number: 'TOTAL', total: totalPurchasesSpend });
+      t.font = { bold: true }; t.getCell('total').numFmt = '#,##0.00'; t.border = { top: { style: 'thin' } };
+    }
+
+    const safeLabel = periodLabel.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="financial-summary-${safeLabel}.xlsx"`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error('Financial summary export error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
 };

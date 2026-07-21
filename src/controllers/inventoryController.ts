@@ -297,3 +297,42 @@ export const getInventoryActivity = async (req: Request, res: Response): Promise
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+// PUT /inventory/activity/:id  { notes }
+//
+// Lets the reason behind an activity entry be corrected after the fact —
+// e.g. a stock count variance logged in a hurry with no explanation, or a
+// waste entry that needs a clearer note for whoever reviews it later. Only
+// the reason is editable; the quantity/type/before-after figures are the
+// actual historical record of what happened to stock and stay fixed —
+// changing those after the fact would mean the audit trail could no longer
+// be trusted to reconcile against what inventory actually shows now.
+export const updateInventoryTransactionNotes = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { notes } = req.body;
+
+    const existing = await query('SELECT id, notes FROM inventory_transactions WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Activity entry not found' });
+      return;
+    }
+
+    const result = await query(
+      'UPDATE inventory_transactions SET notes = $1 WHERE id = $2 RETURNING *',
+      [notes ?? null, id]
+    );
+
+    await logAudit(req, {
+      action: 'inventory_transaction_notes_updated',
+      entityType: 'inventory_transaction',
+      entityId: id,
+      details: { previous_notes: existing.rows[0].notes, new_notes: notes },
+    });
+
+    res.json({ success: true, data: result.rows[0], message: 'Reason updated' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};

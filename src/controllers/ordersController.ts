@@ -344,10 +344,35 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response): Promis
 
     // Lock the order row so the cancel/restock is atomic against a concurrent
     // payment or a late M-Pesa callback touching the same order.
-    const existing = await client.query('SELECT status, table_id, type, total, amount_paid FROM orders WHERE id = $1 FOR UPDATE', [id]);
+    const existing = await client.query(`
+      SELECT o.status, o.table_id, o.type, o.total, o.amount_paid, o.prepared_by, u.full_name as prepared_by_name
+      FROM orders o LEFT JOIN users u ON o.prepared_by = u.id
+      WHERE o.id = $1 FOR UPDATE OF o
+    `, [id]);
     if (existing.rows.length === 0) {
       await client.query('ROLLBACK');
       res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+
+    // Once an admin has assigned this order to a specific chef, nobody
+    // else on the kitchen team can be the one to actually start it — the
+    // whole point of assigning it was to direct a specific person to pick
+    // it up, which a different chef simply grabbing it first would defeat.
+    // Admins and managers can still override (they're the ones who can
+    // reassign it in the first place, via assignOrderToChef), and the
+    // assigned chef themselves is obviously still free to start it.
+    if (
+      status === 'preparing' &&
+      existing.rows[0].prepared_by &&
+      existing.rows[0].prepared_by !== req.user!.id &&
+      !['administrator', 'manager'].includes(req.user!.role)
+    ) {
+      await client.query('ROLLBACK');
+      res.status(403).json({
+        success: false,
+        message: `This order is assigned to ${existing.rows[0].prepared_by_name || 'another chef'} — only they (or an admin) can start it.`,
+      });
       return;
     }
 

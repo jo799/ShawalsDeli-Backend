@@ -3,10 +3,10 @@ import { login, register, forgotPassword, verifyResetOtp, resetPassword, getProf
 import { getOrders, getOrderById, createOrder, updateOrderStatus, processPayment, cancelPendingPayment, refundOrder, voidOrder, getOrderStats, requestRefund, getRefundRequests, approveRefundRequest, declineRefundRequest, assignOrderToChef } from '../controllers/ordersController';
 import { getMenuItems, getCategories, createCategory, updateCategory, deleteCategory, createMenuItem, updateMenuItem, deleteMenuItem, getRecipe, setRecipe, getMenuItemByBarcode } from '../controllers/menuController';
 import { uploadMenuImage } from '../controllers/uploadController';
-import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock } from '../controllers/inventoryController';
+import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock, updateInventoryTransactionNotes } from '../controllers/inventoryController';
 import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, redeemPoints, adjustPoints } from '../controllers/customersController';
 import { getLoyaltyStats, getLoyaltyTiers, updatePointValue } from '../controllers/loyaltyController';
-import { getDailyReport, getSummaryReport } from '../controllers/reportsController';
+import { getDailyReport, getSummaryReport, exportFinancialSummary } from '../controllers/reportsController';
 import { exportSalesReport } from '../controllers/salesReportController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
 import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule } from '../controllers/staffController';
@@ -80,6 +80,7 @@ router.put('/inventory/:id', authenticate, authorize('administrator', 'manager')
 router.delete('/inventory/:id', authenticate, authorize('administrator', 'manager'), deleteInventoryItem);
 router.post('/inventory/:id/adjust', authenticate, adjustStock);
 router.get('/inventory/activity', authenticate, getInventoryActivity);
+router.put('/inventory/activity/:id', authenticate, authorize('administrator', 'manager'), updateInventoryTransactionNotes);
 
 // Customers
 router.get('/customers', authenticate, getCustomers);
@@ -97,6 +98,7 @@ router.put('/loyalty/point-value', authenticate, authorize('administrator', 'man
 router.get('/reports/daily', authenticate, getDailyReport);
 router.get('/reports/summary', authenticate, getSummaryReport);
 router.get('/reports/sales-export', authenticate, exportSalesReport);
+router.get('/reports/financial-summary-export', authenticate, exportFinancialSummary);
 
 // Expenses
 router.get('/expenses', authenticate, getExpenses);

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { query, getClient } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
+import { logAudit } from '../services/auditLog';
 
 // Uses timestamp + random suffix (same approach as order numbers) rather than
 // COUNT(*)+1, which produces duplicates if any PO is ever deleted and races
@@ -315,6 +316,50 @@ export const createSupplier = async (req: AuthRequest, res: Response): Promise<v
       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
     `, [String(name).trim(), contact_person || null, phone || null, email || null, address || null, notes || null]);
     res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// PUT /purchases/:id/payment-status  { payment_status }
+//
+// The column already existed on purchase_orders and was already displayed
+// in the UI — but nothing anywhere in the app could actually change it
+// from its 'unpaid' default. This is the missing write path: whoever
+// actually pays a supplier invoice records it here. It matters beyond
+// bookkeeping tidiness — cash position reporting specifically needs to
+// know whether a purchase's cost has actually left the business yet, and
+// with no way to ever mark one paid, it never would.
+export const updatePurchaseOrderPaymentStatus = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { payment_status } = req.body;
+    const valid = ['unpaid', 'partial', 'paid'];
+    if (!valid.includes(payment_status)) {
+      res.status(400).json({ success: false, message: `payment_status must be one of: ${valid.join(', ')}` });
+      return;
+    }
+
+    const existing = await query('SELECT id, po_number, payment_status FROM purchase_orders WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Purchase order not found' });
+      return;
+    }
+
+    const result = await query(
+      'UPDATE purchase_orders SET payment_status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+      [payment_status, id]
+    );
+
+    await logAudit(req, {
+      action: 'purchase_order_payment_status_updated',
+      entityType: 'purchase_order',
+      entityId: id,
+      details: { po_number: existing.rows[0].po_number, from: existing.rows[0].payment_status, to: payment_status },
+    });
+
+    res.json({ success: true, data: result.rows[0], message: `Marked as ${payment_status}` });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });

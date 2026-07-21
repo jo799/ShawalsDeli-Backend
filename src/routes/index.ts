@@ -6,12 +6,12 @@ import { uploadMenuImage } from '../controllers/uploadController';
 import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock, updateInventoryTransactionNotes } from '../controllers/inventoryController';
 import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, redeemPoints, adjustPoints } from '../controllers/customersController';
 import { getLoyaltyStats, getLoyaltyTiers, updatePointValue } from '../controllers/loyaltyController';
-import { getDailyReport, getSummaryReport, exportFinancialSummary } from '../controllers/reportsController';
+import { getDailyReport, getSummaryReport, exportFinancialSummary, getOwnerDashboard } from '../controllers/reportsController';
 import { exportSalesReport } from '../controllers/salesReportController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
 import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule } from '../controllers/staffController';
 import { getTables, updateTableStatus, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
-import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePurchaseOrder, getSuppliers, createSupplier } from '../controllers/purchasesController';
+import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePurchaseOrder, getSuppliers, createSupplier, updatePurchaseOrderPaymentStatus } from '../controllers/purchasesController';
 import { initiateStkPush, queryStkStatus, mpesaCallback, reconcilePayment } from '../controllers/mpesaController';
 import { createHeldOrder, getHeldOrders, deleteHeldOrder } from '../controllers/heldOrdersController';
 import { getSettings, updateSettings, uploadLogo, getSystemInfo, getStorageUsage, createBackup, getBackups, downloadBackup, getRecentActivity } from '../controllers/settingsController';
@@ -99,6 +99,7 @@ router.get('/reports/daily', authenticate, getDailyReport);
 router.get('/reports/summary', authenticate, getSummaryReport);
 router.get('/reports/sales-export', authenticate, exportSalesReport);
 router.get('/reports/financial-summary-export', authenticate, exportFinancialSummary);
+router.get('/reports/owner-dashboard', authenticate, getOwnerDashboard);
 
 // Expenses
 router.get('/expenses', authenticate, getExpenses);
@@ -154,6 +155,7 @@ router.post('/purchases', authenticate, authorize('administrator', 'manager'), c
 // Receiving a delivery is routine floor/stockroom operation, same level as
 // adjustStock — not restricted to admin/manager the way creating a new PO is.
 router.put('/purchases/:id/receive', authenticate, receivePurchaseOrder);
+router.put('/purchases/:id/payment-status', authenticate, authorize('administrator', 'manager'), updatePurchaseOrderPaymentStatus);
 router.get('/suppliers', authenticate, getSuppliers);
 router.post('/suppliers', authenticate, authorize('administrator', 'manager'), createSupplier);
 

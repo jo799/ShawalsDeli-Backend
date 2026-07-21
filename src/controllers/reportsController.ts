@@ -343,3 +343,116 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+// GET /reports/owner-dashboard
+//
+// The 10 numbers an owner needs to read the health of the whole business
+// in about 30 seconds. Several of these already existed elsewhere in the
+// app but were never actually surfaced on the Dashboard (inventory value,
+// month-scoped expenses); a few needed genuinely new logic that didn't
+// exist anywhere (cash position, waste cost, and — importantly — the
+// EXISTING "top items" list is sorted by revenue, not profit, so the
+// highest earner and the most profitable dish are not necessarily the
+// same thing; a lower-margin item that sells in volume can out-earn a
+// high-margin item that rarely sells, but contribute less actual profit).
+//
+// Scope: revenue/profit/food-cost figures are TODAY (matching the
+// dashboard's existing daily focus and computeSummary). Purchases,
+// expenses, waste, and top item are THIS MONTH — a single day is too
+// sparse a sample for "what's our most profitable dish" or "how much are
+// we spending on stock" to mean much; a month gives a stable, trustworthy
+// answer instead. Inventory value has no time scope at all — it's a
+// snapshot of what's on the shelf right now, not a period total.
+export const getOwnerDashboard = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const summary = await computeSummary(today, today);
+    const foodCostPct = summary.net_sales > 0 ? Math.round((summary.cogs / summary.net_sales) * 100) : 0;
+
+    // Cash position — real money collected today (every payment method
+    // except 'points', which isn't actual cash) minus what actually left
+    // the business today: today's expenses (an expense row IS the paid
+    // record — there's no separate "paid" flag, logging one means it
+    // happened) and any purchase order paid in full today. A partially
+    // paid PO is deliberately excluded rather than guessed at — there's no
+    // amount-paid field on purchase_orders, only a status, so there's no
+    // reliable partial figure to subtract; counting the FULL total for a
+    // partial payment would overstate what actually left the till.
+    const cashInRes = await query(`
+      SELECT COALESCE(SUM(p.amount), 0) as cash_in
+      FROM payments p JOIN orders o ON p.order_id = o.id
+      WHERE DATE(o.created_at) = $1 AND p.status = 'completed' AND p.payment_method != 'points'
+    `, [today]);
+    const paidPurchasesRes = await query(`
+      SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
+      WHERE order_date = $1 AND payment_status = 'paid'
+    `, [today]);
+    const cashPosition = parseFloat(cashInRes.rows[0].cash_in) - summary.total_expenses - parseFloat(paidPurchasesRes.rows[0].total);
+
+    // Inventory value — same calculation getInventory's own stats already
+    // use, just never read by the Dashboard.
+    const invValueRes = await query(`SELECT COALESCE(SUM(quantity * cost_per_unit), 0) as total_value FROM inventory_items WHERE is_active = true`);
+
+    const purchasesMonthRes = await query(`
+      SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
+      WHERE DATE_TRUNC('month', order_date) = DATE_TRUNC('month', CURRENT_DATE) AND status != 'cancelled'
+    `);
+
+    const expensesMonthRes = await query(`
+      SELECT COALESCE(SUM(amount), 0) as total FROM expenses
+      WHERE DATE_TRUNC('month', expense_date) = DATE_TRUNC('month', CURRENT_DATE)
+    `);
+
+    // Waste cost — the current cost_per_unit is the best available figure
+    // for what a wasted quantity was worth; inventory_transactions doesn't
+    // snapshot cost at the time of the transaction (the same limitation
+    // COGS already has via menu_items.cost, not a new one introduced here).
+    const wasteRes = await query(`
+      SELECT COALESCE(SUM(ABS(it.quantity_change) * ii.cost_per_unit), 0) as waste_cost
+      FROM inventory_transactions it JOIN inventory_items ii ON it.inventory_item_id = ii.id
+      WHERE it.type = 'waste' AND DATE_TRUNC('month', it.created_at) = DATE_TRUNC('month', CURRENT_DATE)
+    `);
+
+    // Top profitable item — deliberately sorted by absolute profit
+    // (revenue minus recipe cost), not revenue and not margin percentage.
+    // A 90%-margin item sold twice contributes less real profit than a
+    // 30%-margin item sold two hundred times; this is the one that
+    // actually made the business the most money this month.
+    const topItemRes = await query(`
+      SELECT oi.item_name,
+        SUM(oi.total_price) as sales,
+        SUM(oi.quantity * mi.cost) as total_cost,
+        SUM(oi.total_price) - SUM(oi.quantity * mi.cost) as profit
+      FROM order_items oi
+      JOIN menu_items mi ON oi.menu_item_id = mi.id
+      JOIN orders o ON oi.order_id = o.id
+      WHERE DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', CURRENT_DATE) AND o.status = 'completed'
+      GROUP BY oi.item_name
+      ORDER BY profit DESC
+      LIMIT 1
+    `);
+
+    res.json({
+      success: true,
+      data: {
+        revenue_today: summary.total_sales,
+        gross_profit_today: summary.gross_profit,
+        net_profit_today: summary.net_profit,
+        cash_position_today: cashPosition,
+        inventory_value: parseFloat(invValueRes.rows[0].total_value),
+        purchases_this_month: parseFloat(purchasesMonthRes.rows[0].total),
+        expenses_this_month: parseFloat(expensesMonthRes.rows[0].total),
+        food_cost_pct: foodCostPct,
+        waste_cost_this_month: parseFloat(wasteRes.rows[0].waste_cost),
+        top_profitable_item: topItemRes.rows[0] ? {
+          name: topItemRes.rows[0].item_name,
+          profit: parseFloat(topItemRes.rows[0].profit),
+          sales: parseFloat(topItemRes.rows[0].sales),
+        } : null,
+      },
+    });
+  } catch (error) {
+    console.error('Owner dashboard error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};

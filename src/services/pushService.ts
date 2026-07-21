@@ -61,7 +61,7 @@ const deliverToSubscriptions = async (
 // no way to know which one they'll actually have on them), and cleans up
 // any subscription the browser itself has reported as dead (404/410)
 // rather than retrying it forever.
-const sendPushToRoles = async (roles: string[], payload: PushPayload): Promise<void> => {
+const sendPushToRoles = async (roles: string[], payload: PushPayload, excludeUserId?: string): Promise<void> => {
   if (!configured) return; // Not set up — fail silently, never block whatever triggered this.
 
   try {
@@ -69,8 +69,8 @@ const sendPushToRoles = async (roles: string[], payload: PushPayload): Promise<v
       SELECT ps.id, ps.endpoint, ps.subscription
       FROM push_subscriptions ps
       JOIN users u ON ps.user_id = u.id
-      WHERE u.role = ANY($1) AND u.status = 'active'
-    `, [roles]);
+      WHERE u.role = ANY($1) AND u.status = 'active' AND ($2::uuid IS NULL OR ps.user_id != $2)
+    `, [roles, excludeUserId || null]);
     await deliverToSubscriptions(subs.rows, payload);
   } catch (error) {
     // A notification failure should never prevent whatever triggered it
@@ -106,15 +106,20 @@ interface OrderNotificationPayload {
   body: string;
   orderId: string;
   orderNumber: string;
+  createdByUserId?: string;
 }
 
 // Sends to every device kitchen staff (kitchen_staff, head_chef,
 // administrator, manager — the roles that can actually see Kitchen
-// Display) has subscribed.
+// Display) has subscribed — except the person who actually placed this
+// order themselves. A cashier who's also an admin/manager with phone
+// alerts enabled would otherwise get buzzed about their own sale on top of
+// the in-app "sent to kitchen" toast they're already looking at.
 export const notifyKitchenOfNewOrder = async (payload: OrderNotificationPayload): Promise<void> => {
   await sendPushToRoles(
     ['kitchen_staff', 'head_chef', 'administrator', 'manager'],
-    { title: payload.title, body: payload.body, tag: `order-${payload.orderId}`, url: '/kitchen' }
+    { title: payload.title, body: payload.body, tag: `order-${payload.orderId}`, url: '/kitchen' },
+    payload.createdByUserId
   );
 };
 

@@ -305,6 +305,7 @@ export const createOrder = async (req: AuthRequest, res: Response): Promise<void
         body: orderSummary,
         orderId: order.id,
         orderNumber: order.order_number,
+        createdByUserId: req.user!.id,
       }).catch(() => {}); // Never let a notification failure affect the order response.
       
     }

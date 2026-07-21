@@ -30,7 +30,7 @@ export const getStaff = async (req: Request, res: Response): Promise<void> => {
 
     params.push(Number(limit), offset);
     const result = await query(`
-      SELECT id, full_name, email, phone, role, status, approval_status, schedule_type, avatar_url, joined_date, last_login, created_at
+      SELECT id, full_name, email, phone, role, status, approval_status, schedule_type, avatar_url, joined_date, last_login, created_at, recurring_day_off
       FROM users ${where}
       ORDER BY joined_date DESC
       LIMIT $${idx++} OFFSET $${idx++}
@@ -315,6 +315,151 @@ export const deleteSchedule = async (req: Request, res: Response): Promise<void>
     );
     if (!result.rows.length) { res.status(404).json({ success: false, message: 'No schedule entry found for that staff member on that date' }); return; }
     res.json({ success: true, message: 'Schedule entry removed' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// PUT /staff/:id/recurring-day-off  { recurring_day_off: 0-6 | null }
+//
+// Set once, applies every week from then on — the whole point being an
+// admin shouldn't need to come back and re-set the same day off again next
+// week, and the week after that. 0=Sunday..6=Saturday (matches JS
+// Date.getDay()). Passing null clears it entirely. This is deliberately
+// just a default: an explicit staff_schedules entry for a specific date
+// (someone covering that day, or a one-off sick day recorded separately)
+// still takes precedence — see getSchedules below, which merges the two.
+export const updateRecurringDayOff = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { recurring_day_off } = req.body;
+
+    if (recurring_day_off !== null && (typeof recurring_day_off !== 'number' || recurring_day_off < 0 || recurring_day_off > 6)) {
+      res.status(400).json({ success: false, message: 'recurring_day_off must be a number 0-6 (Sunday-Saturday), or null to clear it' });
+      return;
+    }
+
+    const existing = await query('SELECT id, full_name, recurring_day_off FROM users WHERE id = $1', [id]);
+    if (!existing.rows.length) { res.status(404).json({ success: false, message: 'Staff member not found' }); return; }
+
+    const result = await query(
+      'UPDATE users SET recurring_day_off = $1 WHERE id = $2 RETURNING id, full_name, recurring_day_off',
+      [recurring_day_off, id]
+    );
+
+    await logAudit(req, {
+      action: 'recurring_day_off_updated',
+      entityType: 'user',
+      entityId: id,
+      details: { staff_name: existing.rows[0].full_name, from: existing.rows[0].recurring_day_off, to: recurring_day_off },
+    });
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// POST /staff/attendance/check-in
+//
+// Self-service — always the CURRENT authenticated user checking themselves
+// in, never entered on someone else's behalf through this endpoint. One row
+// per person per day (see the UNIQUE(user_id, attendance_date) constraint);
+// checking in twice the same day just re-confirms the same row rather than
+// creating a duplicate or silently overwriting an earlier check-in time
+// with a later one.
+export const checkIn = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const existing = await query(
+      'SELECT id, check_in_time, check_out_time FROM staff_attendance WHERE user_id = $1 AND attendance_date = CURRENT_DATE',
+      [userId]
+    );
+    if (existing.rows.length > 0 && existing.rows[0].check_in_time) {
+      res.status(400).json({ success: false, message: `Already checked in today at ${new Date(existing.rows[0].check_in_time).toLocaleTimeString()}` });
+      return;
+    }
+    const result = await query(`
+      INSERT INTO staff_attendance (user_id, attendance_date, check_in_time)
+      VALUES ($1, CURRENT_DATE, CURRENT_TIMESTAMP)
+      ON CONFLICT (user_id, attendance_date) DO UPDATE SET check_in_time = CURRENT_TIMESTAMP
+      RETURNING *
+    `, [userId]);
+    res.json({ success: true, data: result.rows[0], message: 'Checked in' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// POST /staff/attendance/check-out
+//
+// Requires an existing check-in today — checking out without ever having
+// checked in wouldn't produce a meaningful shift duration, and would most
+// likely mean the person forgot to check in earlier rather than genuinely
+// having a zero-length shift.
+export const checkOut = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const existing = await query(
+      'SELECT id, check_in_time, check_out_time FROM staff_attendance WHERE user_id = $1 AND attendance_date = CURRENT_DATE',
+      [userId]
+    );
+    if (existing.rows.length === 0 || !existing.rows[0].check_in_time) {
+      res.status(400).json({ success: false, message: "You haven't checked in yet today." });
+      return;
+    }
+    if (existing.rows[0].check_out_time) {
+      res.status(400).json({ success: false, message: `Already checked out today at ${new Date(existing.rows[0].check_out_time).toLocaleTimeString()}` });
+      return;
+    }
+    const result = await query(
+      'UPDATE staff_attendance SET check_out_time = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *',
+      [existing.rows[0].id]
+    );
+    res.json({ success: true, data: result.rows[0], message: 'Checked out' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// GET /staff/attendance?start_date=&end_date=&user_id=
+//
+// user_id is optional — pulling everyone's records (the management view) vs
+// just the caller's own is enforced at the route level, not here.
+export const getAttendance = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { start_date, end_date, user_id } = req.query;
+    const conditions: string[] = ['sa.attendance_date BETWEEN COALESCE($1::date, CURRENT_DATE) AND COALESCE($2::date, CURRENT_DATE)'];
+    const params: unknown[] = [start_date || null, end_date || null];
+    if (user_id) { conditions.push(`sa.user_id = $${params.length + 1}`); params.push(user_id); }
+
+    const result = await query(`
+      SELECT sa.*, u.full_name, u.role as user_role
+      FROM staff_attendance sa
+      JOIN users u ON sa.user_id = u.id
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY sa.attendance_date DESC, u.full_name
+    `, params);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// GET /staff/attendance/me — today's own check-in/out status, for the
+// Clock In/Out widget every staff member sees regardless of role.
+export const getMyAttendanceToday = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const result = await query(
+      'SELECT * FROM staff_attendance WHERE user_id = $1 AND attendance_date = CURRENT_DATE',
+      [req.user!.id]
+    );
+    res.json({ success: true, data: result.rows[0] || null });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });

@@ -1011,6 +1011,57 @@ const createTables = async () => {
       )
     `);
 
+    // Set once per staff member (e.g. "Daniel is off every Sunday") rather
+    // than needing a fresh staff_schedules row created every single week —
+    // that per-date table is for actual shift assignments and one-off
+    // exceptions, not a recurring pattern. 0=Sunday..6=Saturday, matching
+    // JS Date.getDay(); NULL means no recurring day off is set. The
+    // scheduling grid treats this as a fallback: an explicit staff_schedules
+    // entry for a given date (e.g. someone covering that Sunday, or a sick
+    // day) always overrides it — this is just what happens by default when
+    // nothing else has been said about that day.
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS recurring_day_off SMALLINT CHECK (recurring_day_off BETWEEN 0 AND 6)`);
+
+    // Check-in/check-out — a real attendance record distinct from the
+    // schedule itself (staff_schedules says who's SUPPOSED to work when;
+    // this is what actually happened). One row per person per day: a second
+    // check-in the same day updates the same row rather than creating a
+    // duplicate, since a shift only has one real start and end.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS staff_attendance (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        attendance_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        check_in_time TIMESTAMP,
+        check_out_time TIMESTAMP,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, attendance_date)
+      )
+    `);
+
+    // Sick-off requests — a staff member asks for a specific day off with a
+    // reason and a supporting document (e.g. a hospital note), an admin
+    // reviews and approves or declines it. Approving one is handled in the
+    // controller by also writing a real 'off' row to staff_schedules for
+    // that date, so the schedule grid and this request stay in sync rather
+    // than being two separate sources of truth for the same day off.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sick_off_requests (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        requested_date DATE NOT NULL,
+        message TEXT,
+        receipt_url VARCHAR(500),
+        status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','declined')),
+        reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+        reviewed_at TIMESTAMP,
+        decline_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');
   } catch (error) {

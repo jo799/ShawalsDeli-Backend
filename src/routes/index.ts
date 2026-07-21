@@ -9,7 +9,8 @@ import { getLoyaltyStats, getLoyaltyTiers, updatePointValue } from '../controlle
 import { getDailyReport, getSummaryReport, exportFinancialSummary, getOwnerDashboard } from '../controllers/reportsController';
 import { exportSalesReport } from '../controllers/salesReportController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
-import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule } from '../controllers/staffController';
+import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule, updateRecurringDayOff, checkIn, checkOut, getAttendance, getMyAttendanceToday } from '../controllers/staffController';
+import { createSickOffRequest, uploadSickOffReceipt, getSickOffRequests, getMySickOffRequests, approveSickOffRequest, declineSickOffRequest } from '../controllers/sickOffController';
 import { getTables, updateTableStatus, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
 import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePurchaseOrder, getSuppliers, createSupplier, updatePurchaseOrderPaymentStatus } from '../controllers/purchasesController';
 import { initiateStkPush, queryStkStatus, mpesaCallback, reconcilePayment } from '../controllers/mpesaController';
@@ -125,6 +126,19 @@ router.put('/staff/:id/approval', authenticate, authorize('administrator', 'mana
 router.get('/staff/schedules', authenticate, getSchedules);
 router.post('/staff/schedules', authenticate, authorize('administrator', 'manager'), upsertSchedule);
 router.delete('/staff/schedules/:user_id/:shift_date', authenticate, authorize('administrator', 'manager'), deleteSchedule);
+router.put('/staff/:id/recurring-day-off', authenticate, authorize('administrator', 'manager'), updateRecurringDayOff);
+
+router.post('/staff/attendance/check-in', authenticate, checkIn);
+router.post('/staff/attendance/check-out', authenticate, checkOut);
+router.get('/staff/attendance/me', authenticate, getMyAttendanceToday);
+router.get('/staff/attendance', authenticate, authorize('administrator', 'manager'), getAttendance);
+
+router.post('/sick-off-requests', authenticate, createSickOffRequest);
+router.post('/sick-off-requests/:id/receipt', authenticate, uploadSickOffReceipt);
+router.get('/sick-off-requests/mine', authenticate, getMySickOffRequests);
+router.get('/sick-off-requests', authenticate, authorize('administrator'), getSickOffRequests);
+router.post('/sick-off-requests/:id/approve', authenticate, authorize('administrator'), approveSickOffRequest);
+router.post('/sick-off-requests/:id/decline', authenticate, authorize('administrator'), declineSickOffRequest);
 
 // Tables
 router.get('/tables', authenticate, getTables);

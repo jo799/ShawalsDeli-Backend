@@ -146,3 +146,19 @@ interface ChefAssignmentNotificationPayload {
 export const notifyChefOfAssignment = async (chefUserId: string, payload: ChefAssignmentNotificationPayload): Promise<void> => {
   await sendPushToUser(chefUserId, { title: payload.title, body: payload.body, tag: `assignment-${payload.orderId}`, url: '/kitchen' });
 };
+
+interface SickOffNotificationPayload {
+  title: string;
+  body: string;
+  requestId: string;
+}
+
+// Administrator-only — same reasoning as refund requests: they're the sole
+// approval authority for a sick-off request, so nobody else needs to be
+// notified about it.
+export const notifyAdminsOfSickOffRequest = async (payload: SickOffNotificationPayload): Promise<void> => {
+  await sendPushToRoles(
+    ['administrator'],
+    { title: payload.title, body: payload.body, tag: `sick-off-${payload.requestId}`, url: '/scheduling' }
+  );
+};

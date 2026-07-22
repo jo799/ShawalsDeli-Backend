@@ -363,7 +363,7 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
 // we spending on stock" to mean much; a month gives a stable, trustworthy
 // answer instead. Inventory value has no time scope at all — it's a
 // snapshot of what's on the shelf right now, not a period total.
-export const getOwnerDashboard = async (_req: Request, res: Response): Promise<void> => {
+export const getOwnerDashboard = async (req: Request, res: Response): Promise<void> => {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const summary = await computeSummary(today, today);
@@ -398,9 +398,12 @@ export const getOwnerDashboard = async (_req: Request, res: Response): Promise<v
       WHERE DATE_TRUNC('month', order_date) = DATE_TRUNC('month', CURRENT_DATE) AND status != 'cancelled'
     `);
 
+    const expensesPeriod = req.query.expenses_period === 'today' ? 'day'
+      : req.query.expenses_period === 'week' ? 'week'
+      : 'month';
     const expensesMonthRes = await query(`
       SELECT COALESCE(SUM(amount), 0) as total FROM expenses
-      WHERE DATE_TRUNC('month', expense_date) = DATE_TRUNC('month', CURRENT_DATE)
+      WHERE expense_date >= DATE_TRUNC('${expensesPeriod}', CURRENT_TIMESTAMP)::date AND expense_date <= CURRENT_DATE
     `);
 
     // Waste cost — the current cost_per_unit is the best available figure
@@ -441,7 +444,8 @@ export const getOwnerDashboard = async (_req: Request, res: Response): Promise<v
         cash_position_today: cashPosition,
         inventory_value: parseFloat(invValueRes.rows[0].total_value),
         purchases_this_month: parseFloat(purchasesMonthRes.rows[0].total),
-        expenses_this_month: parseFloat(expensesMonthRes.rows[0].total),
+        expenses: parseFloat(expensesMonthRes.rows[0].total),
+        expenses_period_label: { day: 'today', week: 'this week', month: 'this month' }[expensesPeriod],
         food_cost_pct: foodCostPct,
         waste_cost_this_month: parseFloat(wasteRes.rows[0].waste_cost),
         top_profitable_item: topItemRes.rows[0] ? {

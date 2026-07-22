@@ -6,7 +6,7 @@ import { uploadMenuImage } from '../controllers/uploadController';
 import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock, updateInventoryTransactionNotes } from '../controllers/inventoryController';
 import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, redeemPoints, adjustPoints } from '../controllers/customersController';
 import { getLoyaltyStats, getLoyaltyTiers, updatePointValue } from '../controllers/loyaltyController';
-import { getDailyReport, getSummaryReport, exportFinancialSummary, getOwnerDashboard } from '../controllers/reportsController';
+import { getDailyReport, getSummaryReport, exportFinancialSummary, getOwnerDashboard, getDashboardExport } from '../controllers/reportsController';
 import { exportSalesReport } from '../controllers/salesReportController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
 import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule, updateRecurringDayOff, checkIn, checkOut, getAttendance, getMyAttendanceToday } from '../controllers/staffController';
@@ -102,6 +102,7 @@ router.get('/reports/summary', authenticate, getSummaryReport);
 router.get('/reports/sales-export', authenticate, exportSalesReport);
 router.get('/reports/financial-summary-export', authenticate, exportFinancialSummary);
 router.get('/reports/owner-dashboard', authenticate, getOwnerDashboard);
+router.get('/reports/dashboard-export', authenticate, getDashboardExport);
 
 // Expenses
 router.get('/expenses', authenticate, getExpenses);

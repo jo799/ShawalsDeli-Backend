@@ -460,3 +460,116 @@ export const getOwnerDashboard = async (req: Request, res: Response): Promise<vo
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+// GET /reports/dashboard-export?period=day|week|month|year
+//
+// Powers the Dashboard's CSV export. Deliberately a separate endpoint from
+// getOwnerDashboard rather than a retrofit of it — the live dashboard
+// intentionally mixes scopes (today's revenue next to this-month's
+// purchases), which makes sense glanced at on screen but would be a
+// confusing, inconsistent export. Here every figure uses the exact same
+// [start_date, end_date] window, so "Weekly" genuinely means everything is
+// computed over the same one week, no exceptions.
+export const getDashboardExport = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const periodParam = req.query.period;
+    const p = periodParam === 'week' || periodParam === 'month' || periodParam === 'year' ? periodParam : 'day';
+    const periodLabel = { day: 'Daily', week: 'Weekly', month: 'Monthly', year: 'Annual' }[p];
+
+    const rangeRes = await query(`SELECT DATE_TRUNC('${p}', CURRENT_TIMESTAMP)::date as start_d, CURRENT_DATE as end_d`);
+    const startDate: string = rangeRes.rows[0].start_d.toISOString().slice(0, 10);
+    const endDate: string = rangeRes.rows[0].end_d.toISOString().slice(0, 10);
+
+    const summary = await computeSummary(startDate, endDate);
+    const foodCostPct = summary.net_sales > 0 ? Math.round((summary.cogs / summary.net_sales) * 100) : 0;
+
+    // Same cash-position logic as the live dashboard's today-only version,
+    // widened to the full [startDate, endDate] window instead of a single
+    // day — real cash collected in the period minus what actually left
+    // (expenses, and purchases paid in full) during that same window.
+    const cashInRes = await query(`
+      SELECT COALESCE(SUM(p.amount), 0) as cash_in
+      FROM payments p JOIN orders o ON p.order_id = o.id
+      WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND p.status = 'completed' AND p.payment_method != 'points'
+    `, [startDate, endDate]);
+    const paidPurchasesRes = await query(`
+      SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
+      WHERE order_date BETWEEN $1 AND $2 AND payment_status = 'paid'
+    `, [startDate, endDate]);
+    const cashPosition = parseFloat(cashInRes.rows[0].cash_in) - summary.total_expenses - parseFloat(paidPurchasesRes.rows[0].total);
+
+    const purchasesRes = await query(`
+      SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
+      WHERE order_date BETWEEN $1 AND $2 AND status != 'cancelled'
+    `, [startDate, endDate]);
+
+    const wasteRes = await query(`
+      SELECT COALESCE(SUM(ABS(it.quantity_change) * ii.cost_per_unit), 0) as waste_cost
+      FROM inventory_transactions it JOIN inventory_items ii ON it.inventory_item_id = ii.id
+      WHERE it.type = 'waste' AND DATE(it.created_at) BETWEEN $1 AND $2
+    `, [startDate, endDate]);
+
+    const topItemRes = await query(`
+      SELECT oi.item_name,
+        SUM(oi.total_price) as sales,
+        SUM(oi.quantity * mi.cost) as total_cost,
+        SUM(oi.total_price) - SUM(oi.quantity * mi.cost) as profit
+      FROM order_items oi
+      JOIN menu_items mi ON oi.menu_item_id = mi.id
+      JOIN orders o ON oi.order_id = o.id
+      WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND o.status = 'completed'
+      GROUP BY oi.item_name
+      ORDER BY profit DESC
+      LIMIT 1
+    `, [startDate, endDate]);
+
+    // Snapshot-in-time figures — genuinely "right now" rather than scoped to
+    // the period (there's no such thing as "inventory value last Tuesday"
+    // without a historical valuation system this app doesn't have). Still
+    // included in the export, clearly labeled as a snapshot rather than a
+    // period total, so the export isn't silently missing context the live
+    // dashboard also shows.
+    const invValueRes = await query(`SELECT COALESCE(SUM(quantity * cost_per_unit), 0) as total_value FROM inventory_items WHERE is_active = true`);
+    const lowStockRes = await query(`SELECT COUNT(*) as c FROM inventory_items WHERE is_active = true AND quantity <= reorder_level`);
+    const unavailableRes = await query(`SELECT COUNT(*) as c FROM menu_items WHERE status IN ('unavailable', 'out_of_stock')`);
+    const pendingOrdersRes = await query(`SELECT COUNT(*) as c FROM orders WHERE status IN ('new', 'preparing')`);
+    const activeCustomersRes = await query(`SELECT COUNT(*) as c FROM customers WHERE status = 'active'`);
+
+    res.json({
+      success: true,
+      data: {
+        period_label: periodLabel,
+        start_date: startDate,
+        end_date: endDate,
+        revenue: summary.total_sales,
+        total_orders: summary.total_orders,
+        avg_order_value: summary.avg_order_value,
+        total_discounts: summary.total_discounts,
+        net_sales: summary.net_sales,
+        cogs: summary.cogs,
+        gross_profit: summary.gross_profit,
+        gross_profit_margin: summary.gross_profit_margin,
+        total_expenses: summary.total_expenses,
+        net_profit: summary.net_profit,
+        net_profit_margin: summary.net_profit_margin,
+        cash_position: cashPosition,
+        food_cost_pct: foodCostPct,
+        purchases_total: parseFloat(purchasesRes.rows[0].total),
+        waste_cost: parseFloat(wasteRes.rows[0].waste_cost),
+        top_profitable_item: topItemRes.rows[0] ? {
+          name: topItemRes.rows[0].item_name,
+          profit: parseFloat(topItemRes.rows[0].profit),
+          sales: parseFloat(topItemRes.rows[0].sales),
+        } : null,
+        inventory_value: parseFloat(invValueRes.rows[0].total_value),
+        low_stock_items: parseInt(lowStockRes.rows[0].c),
+        unavailable_menu_items: parseInt(unavailableRes.rows[0].c),
+        pending_orders: parseInt(pendingOrdersRes.rows[0].c),
+        active_customers: parseInt(activeCustomersRes.rows[0].c),
+      },
+    });
+  } catch (error) {
+    console.error('Dashboard export error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};

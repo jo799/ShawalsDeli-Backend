@@ -126,7 +126,7 @@ const ensureIpnRegistered = async (): Promise<string> => {
 // frontend to display.
 export const createPesapalOrder = async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
   try {
-    const { order_id, amount, customer_email, customer_phone } = req.body;
+    const { order_id, amount, customer_email, customer_phone, customer_first_name, customer_last_name } = req.body;
 
     if (!order_id || amount === undefined || amount === null) {
       res.status(400).json({ success: false, message: 'order_id and amount are required' });
@@ -203,8 +203,15 @@ export const createPesapalOrder = async (req: AuthRequest, res: ExpressResponse)
         notification_id: ipnId,
         billing_address: {
           email_address: customer_email || 'customer@shawalsdeli.co.ke',
-          phone_number: customer_phone || '',
+          phone_number: customer_phone || '0700000000',
           country_code: 'KE',
+          first_name: customer_first_name || 'Walk-in',
+          last_name: customer_last_name || 'Customer',
+          line_1: 'N/A',
+          city: 'Nairobi',
+          state: 'Nairobi',
+          postal_code: '00100',
+          zip_code: '00100',
         },
       }),
     });

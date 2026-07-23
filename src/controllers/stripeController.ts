@@ -21,21 +21,26 @@ const getStripeConfig = () => {
   const missing: string[] = [];
   if (!secretKey) missing.push('STRIPE_SECRET_KEY');
   if (!publishableKey) missing.push('STRIPE_PUBLISHABLE_KEY');
-  if (!locationId) missing.push('STRIPE_TERMINAL_LOCATION_ID');
+  // STRIPE_TERMINAL_LOCATION_ID is optional
+
   if (missing.length) {
     throw new Error(`Stripe is not configured. Missing: ${missing.join(', ')}`);
   }
+
   if (!secretKey.startsWith('sk_')) {
     throw new Error('STRIPE_SECRET_KEY looks wrong — it should start with sk_test_ or sk_live_.');
   }
+
   if (!publishableKey.startsWith('pk_')) {
     throw new Error('STRIPE_PUBLISHABLE_KEY looks wrong — it should start with pk_test_ or pk_live_.');
   }
+
   // Mixing a test secret key with a live publishable key (or vice versa) is
   // a common copy-paste mistake that produces confusing downstream errors
   // rather than a clear one at the point it actually went wrong.
   const secretIsLive = secretKey.startsWith('sk_live_');
   const publishableIsLive = publishableKey.startsWith('pk_live_');
+
   if (secretIsLive !== publishableIsLive) {
     throw new Error('STRIPE_SECRET_KEY and STRIPE_PUBLISHABLE_KEY are from different modes (one test, one live) — they must match.');
   }

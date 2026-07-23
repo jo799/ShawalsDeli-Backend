@@ -9,7 +9,6 @@ import dotenv from 'dotenv';
 import routes from './routes';
 import { errorHandler, notFound } from './middleware/errorHandler';
 import { sweepExpiredMpesaPayments } from './controllers/mpesaController';
-import { stripeWebhook } from './controllers/stripeController';
 
 dotenv.config();
 
@@ -120,12 +119,6 @@ app.use('/api/auth/verify-otp', rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 }));
-
-// Stripe webhook signature verification needs the raw, unparsed request
-// body — mounted here, before the global express.json() below, so this
-// exact route sees the original bytes rather than an already-parsed (and
-// therefore no longer byte-identical) JSON object.
-app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhook);
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));

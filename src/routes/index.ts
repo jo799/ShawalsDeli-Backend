@@ -14,7 +14,7 @@ import { createSickOffRequest, uploadSickOffReceipt, getSickOffRequests, getMySi
 import { getTables, updateTableStatus, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
 import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePurchaseOrder, getSuppliers, createSupplier, updatePurchaseOrderPaymentStatus } from '../controllers/purchasesController';
 import { initiateStkPush, queryStkStatus, mpesaCallback, reconcilePayment } from '../controllers/mpesaController';
-import { getStripePublicConfig, createConnectionToken, createPaymentIntent, confirmCardPayment, cancelCardPaymentIntent } from '../controllers/stripeController';
+import { createPesapalOrder, getPesapalPaymentStatus, pesapalIpnCallback, cancelPesapalOrder } from '../controllers/pesapalController';
 import { createHeldOrder, getHeldOrders, deleteHeldOrder } from '../controllers/heldOrdersController';
 import { getSettings, updateSettings, uploadLogo, getSystemInfo, getStorageUsage, createBackup, getBackups, downloadBackup, getRecentActivity } from '../controllers/settingsController';
 import { getAuditLogs, getAuditLogActions } from '../controllers/auditLogsController';
@@ -181,19 +181,17 @@ router.get('/mpesa/status/:checkout_request_id', authenticate, queryStkStatus);
 router.post('/mpesa/reconcile/:checkout_request_id', authenticate, reconcilePayment);
 router.post('/mpesa/callback', mpesaCallback); // No auth — called by Safaricom servers
 
-// Stripe Terminal (card reader)
-router.get('/stripe/config', authenticate, getStripePublicConfig);
-router.post('/stripe/connection-token', authenticate, createConnectionToken);
-router.post('/stripe/create-payment-intent', authenticate, createPaymentIntent);
-router.post('/stripe/confirm-payment', authenticate, confirmCardPayment);
-router.post('/stripe/cancel-payment-intent', authenticate, cancelCardPaymentIntent);
-// Note: /stripe/webhook is registered directly in server.ts, before the
-// global express.json() middleware — Stripe's signature check needs the
-// raw request body, so it deliberately isn't duplicated here.
+
 // Alias: the README (and anyone who configured Safaricom's Daraja portal
 // from it before this fix) references /api/payments/mpesa/callback. Keep
 // both live so existing callback URL configs don't silently break.
 router.post('/payments/mpesa/callback', mpesaCallback); // No auth — called by Safaricom servers
+
+// Pesapal (card payments — Visa/Mastercard)
+router.post('/pesapal/create-order', authenticate, createPesapalOrder);
+router.get('/pesapal/status/:order_tracking_id', authenticate, getPesapalPaymentStatus);
+router.post('/pesapal/cancel', authenticate, cancelPesapalOrder);
+router.get('/pesapal/ipn', pesapalIpnCallback); // No auth — called by Pesapal's servers
 
 // Settings — General/Business Profile viewable by any authenticated staff
 // (e.g. business name/logo shown elsewhere in the app), editable only by

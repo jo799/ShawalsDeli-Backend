@@ -10,7 +10,7 @@ import { getDailyReport, getSummaryReport, exportFinancialSummary, getOwnerDashb
 import { exportSalesReport } from '../controllers/salesReportController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
 import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule, updateRecurringDayOff, checkIn, checkOut, getAttendance, getMyAttendanceToday } from '../controllers/staffController';
-import { getCustomRoles, createCustomRole, updateCustomRole, deleteCustomRole } from '../controllers/rolesController';
+import { getCustomRoles, createCustomRole, updateCustomRole, deleteCustomRole, getRoleByName } from '../controllers/rolesController';
 import { createSickOffRequest, uploadSickOffReceipt, getSickOffRequests, getMySickOffRequests, approveSickOffRequest, declineSickOffRequest } from '../controllers/sickOffController';
 import { getTables, updateTableStatus, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
 import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePurchaseOrder, getSuppliers, createSupplier, updatePurchaseOrderPaymentStatus } from '../controllers/purchasesController';
@@ -122,6 +122,7 @@ router.delete('/expenses/:id', authenticate, authorize('administrator', 'manager
 
 // Staff
 router.get('/staff', authenticate, authorize('administrator', 'manager'), getStaff);
+router.get('/roles/custom/:name', authenticate, getRoleByName);
 router.get('/roles/custom', authenticate, authorize('administrator', 'manager'), getCustomRoles);
 router.post('/roles/custom', authenticate, authorize('administrator'), createCustomRole);
 router.put('/roles/custom/:id', authenticate, authorize('administrator'), updateCustomRole);

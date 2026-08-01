@@ -19,6 +19,26 @@ const validatePermissions = (permissions: unknown): permissions is Permission[] 
   return permissions.every(p => (PERMISSIONS as readonly string[]).includes(p));
 };
 
+// GET /roles/custom/:name
+//
+// Open to any authenticated user, unlike the full list above — a
+// custom-role staff member needs to resolve their own permissions (for
+// sidebar/page visibility) without needing admin/manager access just to
+// look themselves up. Returns only what's safe for anyone to see: the
+// permission list itself, nothing about who else has the role or when it
+// was created.
+export const getRoleByName = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { name } = req.params;
+    const result = await query('SELECT name, label, permissions FROM custom_roles WHERE name = $1', [name]);
+    if (!result.rows.length) { res.status(404).json({ success: false, message: 'Role not found' }); return; }
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 // GET /roles/custom — every custom role, with how many staff currently
 // have it (relevant for the frontend's delete-confirmation and for
 // blocking deletion of a role still in use).

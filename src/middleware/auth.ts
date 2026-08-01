@@ -40,12 +40,50 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
   }
 };
 
+// Small cache of custom role names — refreshed periodically, and can be
+// invalidated immediately by rolesController.ts the moment a role is
+// created, renamed, or deleted, so a brand new role works right away
+// instead of waiting out a stale cache window.
+let cachedCustomRoleNames: Set<string> | null = null;
+let cacheExpiresAt = 0;
+const CACHE_TTL_MS = 60 * 1000;
+
+export const invalidateCustomRoleCache = (): void => {
+  cachedCustomRoleNames = null;
+};
+
+const getCustomRoleNames = async (): Promise<Set<string>> => {
+  if (cachedCustomRoleNames && Date.now() < cacheExpiresAt) return cachedCustomRoleNames;
+  try {
+    const result = await query('SELECT name FROM custom_roles');
+    cachedCustomRoleNames = new Set(result.rows.map(r => r.name));
+    cacheExpiresAt = Date.now() + CACHE_TTL_MS;
+    return cachedCustomRoleNames;
+  } catch {
+    // If the lookup itself fails, fail closed (treat as "no custom
+    // roles") rather than throwing and breaking every protected route.
+    return new Set();
+  }
+};
+
 export const authorize = (...roles: string[]) => {
-  return (req: AuthRequest, res: Response, next: NextFunction): void => {
-    if (!req.user || !roles.includes(req.user.role)) {
-      res.status(403).json({ success: false, message: 'Insufficient permissions' });
-      return;
+  return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    if (!req.user) { res.status(403).json({ success: false, message: 'Insufficient permissions' }); return; }
+    if (roles.includes(req.user.role)) { next(); return; }
+
+    // A custom role automatically gets the same access as 'manager' would
+    // for backend purposes — this app's backend authorization is already
+    // coarse (admin-only, or admin+manager+cashier — not distinct checks
+    // per module even for the 7 built-in roles), so this preserves that
+    // exact same granularity rather than inventing a finer one that
+    // wouldn't match how anything else here actually works. Never grants
+    // admin-only access, regardless of what a custom role's picked
+    // permissions include.
+    if (roles.includes('manager')) {
+      const customRoleNames = await getCustomRoleNames();
+      if (customRoleNames.has(req.user.role)) { next(); return; }
     }
-    next();
+
+    res.status(403).json({ success: false, message: 'Insufficient permissions' });
   };
 };

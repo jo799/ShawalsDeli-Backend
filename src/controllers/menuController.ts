@@ -55,7 +55,7 @@ export const getCategories = async (_req: Request, res: Response): Promise<void>
     const result = await query(`
       SELECT c.*, COUNT(m.id) as item_count
       FROM menu_categories c
-      LEFT JOIN menu_items m ON m.category_id = c.id
+      LEFT JOIN menu_items m ON m.category_id = c.id AND m.status != 'archived'
       WHERE c.is_active = true
       GROUP BY c.id ORDER BY c.sort_order
     `);

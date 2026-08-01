@@ -7,6 +7,16 @@ import { logAudit } from '../services/auditLog';
 const VALID_ROLES = ['administrator', 'manager', 'head_chef', 'cashier', 'waiter', 'kitchen_staff', 'cleaner'];
 const VALID_STATUSES = ['active', 'on_leave', 'inactive'];
 
+// A role is valid if it's one of the 7 built-in names, OR a currently-
+// existing custom role's slug. Checked fresh against the database each
+// time rather than cached, since role creation/deletion is rare and this
+// isn't a hot path the way request authorization is.
+const isValidRole = async (role: string): Promise<boolean> => {
+  if (VALID_ROLES.includes(role)) return true;
+  const result = await query('SELECT 1 FROM custom_roles WHERE name = $1', [role]);
+  return result.rows.length > 0;
+};
+
 export const getStaff = async (req: Request, res: Response): Promise<void> => {
   try {
     const { role, status, approval_status, search, page = 1, limit = 10 } = req.query;
@@ -64,8 +74,8 @@ export const createStaff = async (req: AuthRequest, res: Response): Promise<void
       res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
       return;
     }
-    if (role && !VALID_ROLES.includes(role)) {
-      res.status(400).json({ success: false, message: `role must be one of: ${VALID_ROLES.join(', ')}` });
+    if (role && !(await isValidRole(role))) {
+      res.status(400).json({ success: false, message: `"${role}" is not a recognized role — check Staff → Manage Roles for valid options` });
       return;
     }
     const trimmedEmail = String(email).toLowerCase().trim();
@@ -108,8 +118,8 @@ export const setApprovalStatus = async (req: AuthRequest, res: Response): Promis
       res.status(400).json({ success: false, message: `approval_status must be one of: ${validStatuses.join(', ')}` });
       return;
     }
-    if (role && !VALID_ROLES.includes(role)) {
-      res.status(400).json({ success: false, message: `role must be one of: ${VALID_ROLES.join(', ')}` });
+    if (role && !(await isValidRole(role))) {
+      res.status(400).json({ success: false, message: `"${role}" is not a recognized role — check Staff → Manage Roles for valid options` });
       return;
     }
 
@@ -144,8 +154,8 @@ export const updateStaff = async (req: AuthRequest, res: Response): Promise<void
       res.status(400).json({ success: false, message: 'full_name is required' });
       return;
     }
-    if (role && !VALID_ROLES.includes(role)) {
-      res.status(400).json({ success: false, message: `role must be one of: ${VALID_ROLES.join(', ')}` });
+    if (role && !(await isValidRole(role))) {
+      res.status(400).json({ success: false, message: `"${role}" is not a recognized role — check Staff → Manage Roles for valid options` });
       return;
     }
     if (status && !VALID_STATUSES.includes(status)) {

@@ -1062,6 +1062,47 @@ const createTables = async () => {
       )
     `);
 
+    // Custom staff roles — an admin-defined role beyond the 7 built-in
+    // ones, with its own picked set of permissions (matching the same
+    // Permission strings used everywhere else). `name` is what actually
+    // gets stored in users.role (a slug, e.g. 'delivery_rider'); `label`
+    // is what's shown throughout the UI (e.g. "Delivery Rider").
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS custom_roles (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        name VARCHAR(50) UNIQUE NOT NULL,
+        label VARCHAR(100) NOT NULL,
+        permissions JSONB NOT NULL DEFAULT '[]',
+        created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // The original CHECK constraint hardcoded the 7 built-in role names,
+    // which would reject any custom role name outright before it ever
+    // reached application code. Dropped in favor of validating role names
+    // at the application level (against the built-in list OR this new
+    // table), the same way most of this schema already handles anything
+    // that needs to grow past a fixed list. Looked up by name rather than
+    // assumed, since guessing Postgres's auto-generated constraint name
+    // wrong would fail this entire migration.
+    await client.query(`
+      DO $$
+      DECLARE
+        constraint_name text;
+      BEGIN
+        SELECT con.conname INTO constraint_name
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        WHERE rel.relname = 'users' AND con.contype = 'c' AND pg_get_constraintdef(con.oid) LIKE '%role%administrator%';
+
+        IF constraint_name IS NOT NULL THEN
+          EXECUTE format('ALTER TABLE users DROP CONSTRAINT %I', constraint_name);
+        END IF;
+      END $$;
+    `);
+
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');
   } catch (error) {

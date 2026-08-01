@@ -83,6 +83,18 @@ export const getExpenseStats = async (_req: Request, res: Response): Promise<voi
     `);
     const daysElapsedRes = await query(`SELECT EXTRACT(DAY FROM CURRENT_DATE)::int as day`);
 
+    // How much of this month's spending came from the business's own
+    // revenue versus the owner personally covering it - the actual
+    // question this whole feature exists to answer at a glance.
+    const fundingRes = await query(`
+      SELECT funding_source, COALESCE(SUM(amount), 0) as total
+      FROM expenses
+      WHERE DATE_TRUNC('month', expense_date) = DATE_TRUNC('month', CURRENT_DATE)
+      GROUP BY funding_source
+    `);
+    const businessFunded = parseFloat(fundingRes.rows.find(r => r.funding_source === 'business')?.total || '0');
+    const ownerFunded = parseFloat(fundingRes.rows.find(r => r.funding_source === 'owner_personal')?.total || '0');
+
     const budgetRes = await query(`
       SELECT ec.id, ec.name, ec.budget_limit, COALESCE(SUM(e.amount), 0) as spent
       FROM expense_categories ec
@@ -106,6 +118,8 @@ export const getExpenseStats = async (_req: Request, res: Response): Promise<voi
         this_month_count: parseInt(monthRes.rows[0].count),
         this_month_change_pct: changePct,
         average_per_day: Math.round((thisMonthTotal / daysElapsed) * 100) / 100,
+        this_month_business_funded: businessFunded,
+        this_month_owner_funded: ownerFunded,
         over_budget_categories: overBudget.map(r => ({ name: r.name, spent: parseFloat(r.spent), budget_limit: parseFloat(r.budget_limit) })),
       },
     });
@@ -127,10 +141,14 @@ function validateExpenseBody(body: Record<string, unknown>): string | null {
 
 export const createExpense = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { title, description, category_id, vendor, amount, payment_method, expense_date, reference_no, notes } = req.body;
+    const { title, description, category_id, vendor, amount, payment_method, expense_date, reference_no, notes, funding_source } = req.body;
     const validationError = validateExpenseBody(req.body);
     if (validationError) {
       res.status(400).json({ success: false, message: validationError });
+      return;
+    }
+    if (funding_source && !['business', 'owner_personal'].includes(funding_source)) {
+      res.status(400).json({ success: false, message: "funding_source must be 'business' or 'owner_personal'" });
       return;
     }
     if (category_id) {
@@ -147,11 +165,12 @@ export const createExpense = async (req: AuthRequest, res: Response): Promise<vo
     // fixed elsewhere in this app (an expense logged just after midnight
     // Nairobi time could otherwise land on the previous day).
     const result = await query(`
-      INSERT INTO expenses (title, description, category_id, vendor, amount, payment_method, expense_date, reference_no, notes, created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::date, CURRENT_DATE),$8,$9,$10) RETURNING *
+      INSERT INTO expenses (title, description, category_id, vendor, amount, payment_method, expense_date, reference_no, notes, created_by, funding_source)
+      VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::date, CURRENT_DATE),$8,$9,$10,$11) RETURNING *
     `, [
       String(title).trim(), description || null, category_id || null, vendor || null, Number(amount),
       payment_method || null, expense_date || null, reference_no || null, notes || null, req.user!.id,
+      funding_source || 'business',
     ]);
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -163,10 +182,14 @@ export const createExpense = async (req: AuthRequest, res: Response): Promise<vo
 export const updateExpense = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { title, description, category_id, vendor, amount, payment_method, expense_date, reference_no, notes } = req.body;
+    const { title, description, category_id, vendor, amount, payment_method, expense_date, reference_no, notes, funding_source } = req.body;
     const validationError = validateExpenseBody(req.body);
     if (validationError) {
       res.status(400).json({ success: false, message: validationError });
+      return;
+    }
+    if (funding_source && !['business', 'owner_personal'].includes(funding_source)) {
+      res.status(400).json({ success: false, message: "funding_source must be 'business' or 'owner_personal'" });
       return;
     }
     if (category_id) {
@@ -179,10 +202,11 @@ export const updateExpense = async (req: AuthRequest, res: Response): Promise<vo
 
     const result = await query(`
       UPDATE expenses SET title=$1, description=$2, category_id=$3, vendor=$4, amount=$5,
-        payment_method=$6, expense_date=COALESCE($7::date, expense_date), reference_no=$8, notes=$9, updated_at=CURRENT_TIMESTAMP
+        payment_method=$6, expense_date=COALESCE($7::date, expense_date), reference_no=$8, notes=$9, updated_at=CURRENT_TIMESTAMP,
+        funding_source=COALESCE($11, funding_source)
       WHERE id=$10 RETURNING *
     `, [String(title).trim(), description || null, category_id || null, vendor || null, Number(amount),
-        payment_method || null, expense_date || null, reference_no || null, notes || null, id]);
+        payment_method || null, expense_date || null, reference_no || null, notes || null, id, funding_source || null]);
     if (!result.rows.length) { res.status(404).json({ success: false, message: 'Expense not found' }); return; }
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {

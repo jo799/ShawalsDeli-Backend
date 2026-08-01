@@ -13,7 +13,7 @@ import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPasswo
 import { getCustomRoles, createCustomRole, updateCustomRole, deleteCustomRole, getRoleByName } from '../controllers/rolesController';
 import { createSickOffRequest, uploadSickOffReceipt, getSickOffRequests, getMySickOffRequests, approveSickOffRequest, declineSickOffRequest } from '../controllers/sickOffController';
 import { getTables, updateTableStatus, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
-import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePurchaseOrder, getSuppliers, createSupplier, updatePurchaseOrderPaymentStatus } from '../controllers/purchasesController';
+import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePurchaseOrder, getSuppliers, createSupplier, updatePurchaseOrderPaymentStatus, updatePurchaseOrderFundingSource } from '../controllers/purchasesController';
 import { initiateStkPush, queryStkStatus, mpesaCallback, reconcilePayment } from '../controllers/mpesaController';
 import { createPesapalOrder, getPesapalPaymentStatus, pesapalIpnCallback, cancelPesapalOrder } from '../controllers/pesapalController';
 import { createHeldOrder, getHeldOrders, deleteHeldOrder } from '../controllers/heldOrdersController';
@@ -178,6 +178,7 @@ router.post('/purchases', authenticate, authorize('administrator', 'manager'), c
 // adjustStock — not restricted to admin/manager the way creating a new PO is.
 router.put('/purchases/:id/receive', authenticate, receivePurchaseOrder);
 router.put('/purchases/:id/payment-status', authenticate, authorize('administrator', 'manager'), updatePurchaseOrderPaymentStatus);
+router.put('/purchases/:id/funding-source', authenticate, authorize('administrator', 'manager'), updatePurchaseOrderFundingSource);
 router.get('/suppliers', authenticate, getSuppliers);
 router.post('/suppliers', authenticate, authorize('administrator', 'manager'), createSupplier);
 

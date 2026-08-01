@@ -1103,6 +1103,15 @@ const createTables = async () => {
       END $$;
     `);
 
+    // Distinguishes an expense/purchase paid from the business's own
+    // generated revenue versus the owner personally covering the cost out
+    // of their own pocket (a common small-business reality - covering a
+    // shortfall, or fronting money before the business reimburses them).
+    // Defaults to 'business' so every existing record is correctly
+    // treated as business-funded without needing a manual backfill.
+    await client.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS funding_source VARCHAR(20) NOT NULL DEFAULT 'business' CHECK (funding_source IN ('business', 'owner_personal'))`);
+    await client.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS funding_source VARCHAR(20) NOT NULL DEFAULT 'business' CHECK (funding_source IN ('business', 'owner_personal'))`);
+
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');
   } catch (error) {

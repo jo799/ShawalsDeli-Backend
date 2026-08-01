@@ -81,11 +81,16 @@ export const createPurchaseOrder = async (req: AuthRequest, res: Response): Prom
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    const { supplier_id, expected_date, items, notes, discount = 0 } = req.body;
+    const { supplier_id, expected_date, items, notes, discount = 0, funding_source } = req.body;
 
     if (!supplier_id) {
       await client.query('ROLLBACK');
       res.status(400).json({ success: false, message: 'supplier_id is required' });
+      return;
+    }
+    if (funding_source && !['business', 'owner_personal'].includes(funding_source)) {
+      await client.query('ROLLBACK');
+      res.status(400).json({ success: false, message: "funding_source must be 'business' or 'owner_personal'" });
       return;
     }
     if (!Array.isArray(items) || items.length === 0) {
@@ -126,9 +131,9 @@ export const createPurchaseOrder = async (req: AuthRequest, res: Response): Prom
     // anything yet.
 
     const poRes = await client.query(`
-      INSERT INTO purchase_orders (po_number, supplier_id, status, expected_date, subtotal, discount, total_amount, notes, created_by)
-      VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8) RETURNING *
-    `, [po_number, supplier_id, expected_date || null, subtotal, discount, total_amount, notes || null, req.user!.id]);
+      INSERT INTO purchase_orders (po_number, supplier_id, status, expected_date, subtotal, discount, total_amount, notes, created_by, funding_source)
+      VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9) RETURNING *
+    `, [po_number, supplier_id, expected_date || null, subtotal, discount, total_amount, notes || null, req.user!.id, funding_source || 'business']);
 
     for (const item of items) {
       await client.query(`
@@ -360,6 +365,46 @@ export const updatePurchaseOrderPaymentStatus = async (req: AuthRequest, res: Re
     });
 
     res.json({ success: true, data: result.rows[0], message: `Marked as ${payment_status}` });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// PUT /purchases/:id/funding-source  { funding_source }
+//
+// Corrects who actually paid for a PO after the fact - e.g. it was
+// created assuming business funds, but the owner ended up covering it
+// personally, or vice versa.
+export const updatePurchaseOrderFundingSource = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { funding_source } = req.body;
+    const valid = ['business', 'owner_personal'];
+    if (!valid.includes(funding_source)) {
+      res.status(400).json({ success: false, message: `funding_source must be one of: ${valid.join(', ')}` });
+      return;
+    }
+
+    const existing = await query('SELECT id, po_number, funding_source FROM purchase_orders WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Purchase order not found' });
+      return;
+    }
+
+    const result = await query(
+      'UPDATE purchase_orders SET funding_source = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+      [funding_source, id]
+    );
+
+    await logAudit(req, {
+      action: 'purchase_order_funding_source_updated',
+      entityType: 'purchase_order',
+      entityId: id,
+      details: { po_number: existing.rows[0].po_number, from: existing.rows[0].funding_source, to: funding_source },
+    });
+
+    res.json({ success: true, data: result.rows[0], message: `Marked as ${funding_source === 'owner_personal' ? "owner's personal money" : 'business funds'}` });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });

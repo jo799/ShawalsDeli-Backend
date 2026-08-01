@@ -245,21 +245,25 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
     const summary = await computeSummary(startDate, endDate);
 
     const purchasesRes = await query(`
-      SELECT po.po_number, po.order_date, po.status, po.total_amount, s.name as supplier_name
+      SELECT po.po_number, po.order_date, po.status, po.total_amount, po.funding_source, s.name as supplier_name
       FROM purchase_orders po
       LEFT JOIN suppliers s ON po.supplier_id = s.id
       WHERE po.order_date BETWEEN $1 AND $2
       ORDER BY po.order_date DESC
     `, [startDate, endDate]);
     const totalPurchasesSpend = purchasesRes.rows.reduce((sum, r) => sum + Number(r.total_amount), 0);
+    const purchasesOwnerFunded = purchasesRes.rows.filter(r => r.funding_source === 'owner_personal').reduce((sum, r) => sum + Number(r.total_amount), 0);
+    const purchasesBusinessFunded = totalPurchasesSpend - purchasesOwnerFunded;
 
     const expensesRes = await query(`
-      SELECT e.title, ec.name as category_name, e.vendor, e.expense_date, e.payment_method, e.amount
+      SELECT e.title, ec.name as category_name, e.vendor, e.expense_date, e.payment_method, e.amount, e.funding_source
       FROM expenses e
       LEFT JOIN expense_categories ec ON e.category_id = ec.id
       WHERE e.expense_date BETWEEN $1 AND $2
       ORDER BY e.expense_date DESC
     `, [startDate, endDate]);
+    const expensesOwnerFunded = expensesRes.rows.filter(r => r.funding_source === 'owner_personal').reduce((sum, r) => sum + Number(r.amount), 0);
+    const expensesBusinessFunded = summary.total_expenses - expensesOwnerFunded;
 
     const workbook = new ExcelJS.Workbook();
     workbook.creator = "Shawal's Deli POS";
@@ -284,13 +288,20 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
       ['Net Profit Margin', `${summary.net_profit_margin}%`],
       [],
       ['Total Purchases Spend (stock bought this period)', totalPurchasesSpend],
+      [],
+      ['MONEY SOURCE BREAKDOWN', ''],
+      ['Expenses — Paid from Business Funds', expensesBusinessFunded],
+      ['Expenses — Paid from Owner\'s Personal Money', expensesOwnerFunded],
+      ['Purchases — Paid from Business Funds', purchasesBusinessFunded],
+      ['Purchases — Paid from Owner\'s Personal Money', purchasesOwnerFunded],
+      ['Total Owner Personally Contributed This Period', expensesOwnerFunded + purchasesOwnerFunded],
     ];
     summaryRows.forEach(row => {
       if (row.length === 0) { summarySheet.addRow({}); return; }
       const [metric, value] = row;
       const r = summarySheet.addRow({ metric, value: typeof value === 'number' ? value : value });
       if (typeof value === 'number') r.getCell('value').numFmt = '#,##0.00';
-      if (metric === 'Net Profit' || metric === 'Gross Profit') r.font = { bold: true };
+      if (metric === 'Net Profit' || metric === 'Gross Profit' || metric === 'MONEY SOURCE BREAKDOWN' || metric === 'Total Owner Personally Contributed This Period') r.font = { bold: true };
     });
 
     // ── Sheet 2: Expenses Detail ─────────────────────────────────────────
@@ -299,6 +310,7 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
       { header: 'Date', key: 'date', width: 12 }, { header: 'Title', key: 'title', width: 28 },
       { header: 'Category', key: 'category', width: 18 }, { header: 'Vendor', key: 'vendor', width: 20 },
       { header: 'Payment Method', key: 'payment_method', width: 16 }, { header: 'Amount (KES)', key: 'amount', width: 14 },
+      { header: 'Funded By', key: 'funded_by', width: 16 },
     ];
     expSheet.getRow(1).font = { bold: true };
     expSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3A712' } };
@@ -306,6 +318,7 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
       date: new Date(e.expense_date).toLocaleDateString('en-KE', { day: '2-digit', month: 'short', year: 'numeric' }),
       title: e.title, category: e.category_name || '—', vendor: e.vendor || '—',
       payment_method: e.payment_method ? e.payment_method.toUpperCase() : '—', amount: Number(e.amount),
+      funded_by: e.funding_source === 'owner_personal' ? "Owner's Personal Money" : 'Business Funds',
     }));
     expSheet.getColumn('amount').numFmt = '#,##0.00';
     if (expensesRes.rows.length > 0) {
@@ -318,7 +331,7 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
     poSheet.columns = [
       { header: 'Date', key: 'date', width: 12 }, { header: 'PO Number', key: 'po_number', width: 18 },
       { header: 'Supplier', key: 'supplier', width: 24 }, { header: 'Status', key: 'status', width: 14 },
-      { header: 'Total (KES)', key: 'total', width: 14 },
+      { header: 'Total (KES)', key: 'total', width: 14 }, { header: 'Funded By', key: 'funded_by', width: 16 },
     ];
     poSheet.getRow(1).font = { bold: true };
     poSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3A712' } };
@@ -326,6 +339,7 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
       date: new Date(p.order_date).toLocaleDateString('en-KE', { day: '2-digit', month: 'short', year: 'numeric' }),
       po_number: p.po_number, supplier: p.supplier_name || '—',
       status: (p.status as string).replace('_', ' '), total: Number(p.total_amount),
+      funded_by: p.funding_source === 'owner_personal' ? "Owner's Personal Money" : 'Business Funds',
     }));
     poSheet.getColumn('total').numFmt = '#,##0.00';
     if (purchasesRes.rows.length > 0) {
@@ -502,6 +516,14 @@ export const getDashboardExport = async (req: Request, res: Response): Promise<v
       SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
       WHERE order_date BETWEEN $1 AND $2 AND status != 'cancelled'
     `, [startDate, endDate]);
+    const purchasesOwnerFundedRes = await query(`
+      SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
+      WHERE order_date BETWEEN $1 AND $2 AND status != 'cancelled' AND funding_source = 'owner_personal'
+    `, [startDate, endDate]);
+    const expensesOwnerFundedRes = await query(`
+      SELECT COALESCE(SUM(amount), 0) as total FROM expenses
+      WHERE expense_date BETWEEN $1 AND $2 AND funding_source = 'owner_personal'
+    `, [startDate, endDate]);
 
     const wasteRes = await query(`
       SELECT COALESCE(SUM(ABS(it.quantity_change) * ii.cost_per_unit), 0) as waste_cost
@@ -555,6 +577,8 @@ export const getDashboardExport = async (req: Request, res: Response): Promise<v
         cash_position: cashPosition,
         food_cost_pct: foodCostPct,
         purchases_total: parseFloat(purchasesRes.rows[0].total),
+        purchases_owner_funded: parseFloat(purchasesOwnerFundedRes.rows[0].total),
+        expenses_owner_funded: parseFloat(expensesOwnerFundedRes.rows[0].total),
         waste_cost: parseFloat(wasteRes.rows[0].waste_cost),
         top_profitable_item: topItemRes.rows[0] ? {
           name: topItemRes.rows[0].item_name,

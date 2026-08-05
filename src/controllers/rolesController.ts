@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { query } from '../config/database';
 import { AuthRequest, invalidateCustomRoleCache } from '../middleware/auth';
 import { logAudit } from '../services/auditLog';
-import { PERMISSIONS, ROLES, type Permission } from '../permissions';
+import { PERMISSIONS, ROLES, expandImpliedPermissions, type Permission } from '../permissions';
 
 // Reserved so a custom role can never collide with (or silently shadow) one
 // of the 7 built-in role names.
@@ -32,7 +32,8 @@ export const getRoleByName = async (req: AuthRequest, res: Response): Promise<vo
     const { name } = req.params;
     const result = await query('SELECT name, label, permissions FROM custom_roles WHERE name = $1', [name]);
     if (!result.rows.length) { res.status(404).json({ success: false, message: 'Role not found' }); return; }
-    res.json({ success: true, data: result.rows[0] });
+    const role = result.rows[0];
+    res.json({ success: true, data: { ...role, permissions: expandImpliedPermissions(role.permissions) } });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -51,7 +52,8 @@ export const getCustomRoles = async (_req: AuthRequest, res: Response): Promise<
       GROUP BY cr.id
       ORDER BY cr.created_at DESC
     `);
-    res.json({ success: true, data: result.rows });
+    const rows = result.rows.map(r => ({ ...r, permissions: expandImpliedPermissions(r.permissions) }));
+    res.json({ success: true, data: rows });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -83,12 +85,13 @@ export const createCustomRole = async (req: AuthRequest, res: Response): Promise
     const existing = await query('SELECT id FROM custom_roles WHERE name = $1', [name]);
     if (existing.rows.length > 0) { res.status(409).json({ success: false, message: `A role named "${label}" already exists` }); return; }
 
+    const normalizedPermissions = expandImpliedPermissions(permissions);
     const result = await query(
       `INSERT INTO custom_roles (name, label, permissions, created_by) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [name, String(label).trim(), JSON.stringify(permissions), req.user!.id]
+      [name, String(label).trim(), JSON.stringify(normalizedPermissions), req.user!.id]
     );
 
-    await logAudit(req, { action: 'custom_role_created', entityType: 'custom_role', entityId: result.rows[0].id, details: { label, permissions } });
+    await logAudit(req, { action: 'custom_role_created', entityType: 'custom_role', entityId: result.rows[0].id, details: { label, permissions: normalizedPermissions } });
 
     invalidateCustomRoleCache();
     res.status(201).json({ success: true, data: { ...result.rows[0], staff_count: 0 } });
@@ -125,7 +128,7 @@ export const updateCustomRole = async (req: AuthRequest, res: Response): Promise
     const result = await query(
       `UPDATE custom_roles SET label = COALESCE($1, label), permissions = COALESCE($2, permissions), updated_at = CURRENT_TIMESTAMP
        WHERE id = $3 RETURNING *`,
-      [label ? String(label).trim() : null, permissions ? JSON.stringify(permissions) : null, id]
+      [label ? String(label).trim() : null, permissions ? JSON.stringify(expandImpliedPermissions(permissions)) : null, id]
     );
 
     await logAudit(req, { action: 'custom_role_updated', entityType: 'custom_role', entityId: id, details: { label, permissions } });

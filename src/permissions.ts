@@ -205,6 +205,30 @@ export function isValidStatus(status: string): status is UserStatus {
   return (USER_STATUSES as readonly string[]).includes(status);
 }
 
+// Every built-in role that grants a module-level permission beyond plain
+// viewing (e.g. cashier's 'pos.manage') also explicitly grants that
+// module's '.view' permission — you can't sensibly manage something you
+// can't see. Custom roles built through the "What can this role access?"
+// checklist in Manage Roles don't get that pairing for free: MATRIX_MODULES
+// deliberately shows one representative checkbox per module (often the
+// '.manage' variant, so the label reads "Orders" rather than "Orders
+// (View)"), and checking it stores only that single permission. Since
+// every route guard (ROUTE_PERMISSIONS) checks specifically for '.view',
+// a role holding only 'orders.manage' can manage orders on paper but can't
+// actually reach the Orders page or see its sidebar link — the module
+// silently vanishes from their nav. This normalizes any permission list so
+// a module-level permission always implies that module's view permission,
+// closing that gap for every role, not just ones built a particular way.
+export function expandImpliedPermissions(permissions: Permission[]): Permission[] {
+  const expanded = new Set<Permission>(permissions);
+  for (const p of permissions) {
+    const module = p.split('.')[0];
+    const viewPerm = `${module}.view` as Permission;
+    if ((PERMISSIONS as readonly string[]).includes(viewPerm)) expanded.add(viewPerm);
+  }
+  return Array.from(expanded);
+}
+
 export function getPermissionsForRole(role: string): Permission[] {
   if (!isValidRole(role)) return [];
   return ROLE_PERMISSIONS[role];

@@ -251,6 +251,56 @@ export const resetStaffPassword = async (req: AuthRequest, res: Response): Promi
   }
 };
 
+// DELETE /staff/:id — permanently remove a staff member's account.
+//
+// Distinct from deactivating (status='inactive'): a deactivated account is
+// still listed, still owns every record it ever touched, and can be
+// reactivated with one click. This actually erases the login. It's meant
+// for someone who's truly gone (dismissed, left the business) and shouldn't
+// still occupy a slot in the staff list.
+//
+// Safe to hard-delete because the schema already draws the right line for
+// us (see migrate.ts): purely personal records — their own attendance,
+// schedule entries, sick-off/leave requests, notification subscriptions,
+// login/reset tokens — are ON DELETE CASCADE and disappear with them.
+// Business records they merely touched — orders they served, expenses they
+// logged, purchase orders they created, audit log entries, etc. — are ON
+// DELETE SET NULL, so that history stays intact; it just shows no author
+// anymore, same as if the record predates accounts entirely.
+export const deleteStaff = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+
+    if (req.user!.id === id) {
+      res.status(400).json({ success: false, message: 'You cannot delete your own account' });
+      return;
+    }
+
+    const existing = await query('SELECT id, full_name, role FROM users WHERE id = $1', [id]);
+    if (!existing.rows.length) { res.status(404).json({ success: false, message: 'Staff not found' }); return; }
+
+    // Losing the last administrator would leave nobody able to manage
+    // staff, roles, or settings — deactivation has no such guard because
+    // it's reversible, but a delete here could genuinely lock the business
+    // out of its own system.
+    if (existing.rows[0].role === 'administrator') {
+      const adminCount = await query(`SELECT COUNT(*) as c FROM users WHERE role = 'administrator' AND approval_status = 'approved'`);
+      if (parseInt(adminCount.rows[0].c) <= 1) {
+        res.status(400).json({ success: false, message: 'Cannot delete the last remaining administrator' });
+        return;
+      }
+    }
+
+    await query('DELETE FROM users WHERE id = $1', [id]);
+    await logAudit(req, { action: 'staff_deleted', entityType: 'user', entityId: id, details: { full_name: existing.rows[0].full_name, role: existing.rows[0].role } });
+
+    res.json({ success: true, message: `${existing.rows[0].full_name} was permanently removed.` });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 export const getSchedules = async (req: Request, res: Response): Promise<void> => {
   try {
     const { start_date, end_date } = req.query;

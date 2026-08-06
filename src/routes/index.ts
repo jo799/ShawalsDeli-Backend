@@ -9,7 +9,7 @@ import { getLoyaltyStats, getLoyaltyTiers, updatePointValue } from '../controlle
 import { getDailyReport, getSummaryReport, exportFinancialSummary, getOwnerDashboard, getDashboardExport } from '../controllers/reportsController';
 import { exportSalesReport } from '../controllers/salesReportController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
-import { getStaff, createStaff, updateStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule, updateRecurringDayOff, checkIn, checkOut, getAttendance, getMyAttendanceToday } from '../controllers/staffController';
+import { getStaff, createStaff, updateStaff, deleteStaff, setApprovalStatus, resetStaffPassword, getSchedules, upsertSchedule, deleteSchedule, updateRecurringDayOff, checkIn, checkOut, getAttendance, getMyAttendanceToday } from '../controllers/staffController';
 import { getCustomRoles, createCustomRole, updateCustomRole, deleteCustomRole, getRoleByName } from '../controllers/rolesController';
 import { createSickOffRequest, uploadSickOffReceipt, getSickOffRequests, getMySickOffRequests, approveSickOffRequest, declineSickOffRequest } from '../controllers/sickOffController';
 import { getTables, updateTableStatus, createTable, updateTable, deleteTable, getReservations, createReservation, updateReservationStatus } from '../controllers/tablesController';
@@ -131,6 +131,10 @@ router.post('/staff', authenticate, authorize('administrator', 'manager'), creat
 router.put('/staff/:id', authenticate, authorize('administrator', 'manager'), updateStaff);
 router.put('/staff/:id/reset-password', authenticate, authorize('administrator', 'manager'), resetStaffPassword);
 router.put('/staff/:id/approval', authenticate, authorize('administrator', 'manager'), setApprovalStatus);
+// Administrator-only, unlike the edit/reset-password/deactivate routes
+// above — this permanently removes the account rather than reversibly
+// flipping a status flag, same trust level as deleting a custom role.
+router.delete('/staff/:id', authenticate, authorize('administrator'), deleteStaff);
 router.get('/staff/schedules', authenticate, getSchedules);
 router.post('/staff/schedules', authenticate, authorize('administrator', 'manager'), upsertSchedule);
 router.delete('/staff/schedules/:user_id/:shift_date', authenticate, authorize('administrator', 'manager'), deleteSchedule);

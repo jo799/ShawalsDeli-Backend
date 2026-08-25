@@ -140,7 +140,7 @@ export const deleteCategory = async (req: Request, res: Response): Promise<void>
 export const createMenuItem = async (req: Request, res: Response): Promise<void> => {
   try {
     const { name, description, price, cost, category_id, preparation_time, status, tags, image_url,
-            track_stock, stock_quantity, reorder_level, barcode } = req.body;
+            track_stock, stock_quantity, reorder_level, barcode, ready_to_eat } = req.body;
     if (!name || !name.toString().trim()) {
       res.status(400).json({ success: false, message: 'name is required' });
       return;
@@ -174,10 +174,10 @@ export const createMenuItem = async (req: Request, res: Response): Promise<void>
     }
     const result = await query(`
       INSERT INTO menu_items (name, description, price, cost, category_id, preparation_time, status, tags, image_url,
-        track_stock, stock_quantity, reorder_level, barcode)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
+        track_stock, stock_quantity, reorder_level, barcode, ready_to_eat)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *
     `, [name.toString().trim(), description, numericPrice, cost || 0, category_id || null, preparation_time || 15, status || 'available', tags || [], image_url || null,
-        trackStock, stockQty, reorderLvl, trimmedBarcode]);
+        trackStock, stockQty, reorderLvl, trimmedBarcode, ready_to_eat === true]);
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error(error);
@@ -189,7 +189,7 @@ export const updateMenuItem = async (req: AuthRequest, res: Response): Promise<v
   try {
     const { id } = req.params;
     const { name, description, price, cost, category_id, preparation_time, status, tags, image_url,
-            track_stock, stock_quantity, reorder_level, barcode } = req.body;
+            track_stock, stock_quantity, reorder_level, barcode, ready_to_eat } = req.body;
 
     const trackStock = track_stock === true;
     const stockQty = trackStock ? Number(stock_quantity) : 0;
@@ -225,10 +225,10 @@ export const updateMenuItem = async (req: AuthRequest, res: Response): Promise<v
     const result = await query(`
       UPDATE menu_items SET name=$1, description=$2, price=$3, cost=$4, category_id=$5,
         preparation_time=$6, status=$7, tags=$8, image_url=$9,
-        track_stock=$10, stock_quantity=$11, reorder_level=$12, barcode=$13, updated_at=CURRENT_TIMESTAMP
-      WHERE id=$14 RETURNING *
+        track_stock=$10, stock_quantity=$11, reorder_level=$12, barcode=$13, ready_to_eat=$14, updated_at=CURRENT_TIMESTAMP
+      WHERE id=$15 RETURNING *
     `, [name, description, price, cost, category_id || null, preparation_time, status, tags, image_url,
-        trackStock, stockQty, reorderLvl, trimmedBarcode, id]);
+        trackStock, stockQty, reorderLvl, trimmedBarcode, ready_to_eat === true, id]);
     if (!result.rows.length) { res.status(404).json({ success: false, message: 'Item not found' }); return; }
 
     if (trackStock && stockQty !== priorQty) {

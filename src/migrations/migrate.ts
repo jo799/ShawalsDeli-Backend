@@ -1112,6 +1112,14 @@ const createTables = async () => {
     await client.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS funding_source VARCHAR(20) NOT NULL DEFAULT 'business' CHECK (funding_source IN ('business', 'owner_personal'))`);
     await client.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS funding_source VARCHAR(20) NOT NULL DEFAULT 'business' CHECK (funding_source IN ('business', 'owner_personal'))`);
 
+    // Items that don't need kitchen preparation at all (Bhajia, pre-made
+    // snacks, bottled drinks) - set once on the menu item itself rather
+    // than re-decided every time someone rings one up, so it's never
+    // accidentally forgotten at the register. An order mixing this with a
+    // cooked item still correctly sends only the cooked item to the
+    // kitchen - see order_items.status below.
+    await client.query(`ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS ready_to_eat BOOLEAN NOT NULL DEFAULT false`);
+
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');
   } catch (error) {

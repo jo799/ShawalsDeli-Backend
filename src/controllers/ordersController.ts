@@ -206,19 +206,19 @@ export const createOrder = async (req: AuthRequest, res: Response): Promise<void
     // whatever unit_price the client sent. This is the same principle as
     // the M-Pesa amount validation: money math never trusts client input.
     const menuItemIds = items.map((i: { menu_item_id: string }) => i.menu_item_id).filter(Boolean);
-    const priceLookup = new Map<string, { price: number; name: string }>();
+    const priceLookup = new Map<string, { price: number; name: string; ready_to_eat: boolean }>();
     if (menuItemIds.length > 0) {
       const priceResult = await client.query(
-        `SELECT id, name, price FROM menu_items WHERE id = ANY($1::uuid[])`,
+        `SELECT id, name, price, ready_to_eat FROM menu_items WHERE id = ANY($1::uuid[])`,
         [menuItemIds]
       );
       for (const row of priceResult.rows) {
-        priceLookup.set(row.id, { price: Number(row.price), name: row.name });
+        priceLookup.set(row.id, { price: Number(row.price), name: row.name, ready_to_eat: row.ready_to_eat });
       }
     }
 
     let subtotal = 0;
-    const resolvedItems: { menu_item_id: string | null; item_name: string; quantity: number; unit_price: number; modifiers: unknown; special_instructions: string | null }[] = [];
+    const resolvedItems: { menu_item_id: string | null; item_name: string; quantity: number; unit_price: number; modifiers: unknown; special_instructions: string | null; ready_to_eat: boolean }[] = [];
 
     for (const item of items) {
       const quantity = Number(item.quantity);
@@ -243,6 +243,10 @@ export const createOrder = async (req: AuthRequest, res: Response): Promise<void
         unit_price: unitPrice,
         modifiers: item.modifiers || null,
         special_instructions: item.special_instructions || null,
+        // Ad-hoc/custom items (no catalog match) default to needing kitchen
+        // prep, same as any regular dish - only a catalog item explicitly
+        // marked ready_to_eat skips it.
+        ready_to_eat: known?.ready_to_eat === true,
       });
     }
 
@@ -260,25 +264,31 @@ export const createOrder = async (req: AuthRequest, res: Response): Promise<void
     // Orders intended for M-Pesa payment start in 'awaiting_payment' so they
     // don't occupy kitchen workflow or count as confirmed revenue until the
     // STK push actually resolves. Cash/card/split orders go straight to
-    // 'new' since the cashier is confirming payment in the same breath.
-    const initialStatus = payment_method === 'mpesa' ? 'awaiting_payment' : 'new';
+    // 'new' since the cashier is confirming payment in the same breath —
+    // unless every single item is ready-to-eat (Bhajia, pre-made snacks),
+    // in which case there's genuinely nothing for the kitchen to do and the
+    // order is already complete the moment it's paid for.
+    const allItemsReadyToEat = resolvedItems.length > 0 && resolvedItems.every(i => i.ready_to_eat);
+    const initialStatus = payment_method === 'mpesa' ? 'awaiting_payment' : (allItemsReadyToEat ? 'completed' : 'new');
 
     const orderResult = await client.query(`
       INSERT INTO orders (order_number, type, status, table_id, customer_id, customer_name, guests,
-        subtotal, service_charge, tax, total, special_instructions, served_by, client_reference_id)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        subtotal, service_charge, tax, total, special_instructions, served_by, client_reference_id, completed_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING *
     `, [generateOrderNumber(), type, initialStatus, table_id || null, customer_id || null, customer_name || null,
-        guests || 1, subtotal, service_charge, tax, total, special_instructions || null, req.user!.id, client_reference_id || null]);
+        guests || 1, subtotal, service_charge, tax, total, special_instructions || null, req.user!.id, client_reference_id || null,
+        initialStatus === 'completed' ? new Date() : null]);
 
     const order = orderResult.rows[0];
 
     for (const item of resolvedItems) {
       await client.query(`
-        INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, unit_price, total_price, modifiers, special_instructions)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, unit_price, total_price, modifiers, special_instructions, status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
       `, [order.id, item.menu_item_id, item.item_name, item.quantity, item.unit_price,
-          Math.round(item.unit_price * item.quantity * 100) / 100, JSON.stringify(item.modifiers), item.special_instructions]);
+          Math.round(item.unit_price * item.quantity * 100) / 100, JSON.stringify(item.modifiers), item.special_instructions,
+          item.ready_to_eat ? 'served' : 'pending']);
     }
 
     if (table_id) {
@@ -286,12 +296,13 @@ export const createOrder = async (req: AuthRequest, res: Response): Promise<void
     }
 
     // Deduct ingredient stock now for orders that go straight to the kitchen
-    // (cash/card/split → status 'new'). M-Pesa orders sit in
+    // or are already complete (cash/card/split → status 'new' or, for an
+    // all-ready-to-eat order, 'completed'). M-Pesa orders sit in
     // 'awaiting_payment' and MUST NOT deduct here — they deduct only once the
     // STK push confirms (see markPaymentCompleted in mpesaController), so an
     // abandoned prompt never silently drains inventory.
     let stockShortfalls: { name: string; needed: number; available: number; unit: string }[] = [];
-    if (initialStatus === 'new') {
+    if (initialStatus === 'new' || initialStatus === 'completed') {
       const deduction = await deductInventoryForOrder(client, order.id, req.user!.id);
       stockShortfalls = deduction.shortfalls;
     }

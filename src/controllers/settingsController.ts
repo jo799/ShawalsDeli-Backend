@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 import { logAudit } from '../services/auditLog';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
+import bcrypt from 'bcryptjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -201,29 +202,32 @@ async function getLatestBackupMeta(): Promise<{ filename: string; size_bytes: nu
   return { filename: latest.f, size_bytes: latest.stat.size, created_at: latest.stat.mtime.toISOString() };
 }
 
+async function runPgDump(filename: string): Promise<{ filepath: string; stat: fs.Stats }> {
+  const filepath = path.join(BACKUP_DIR, filename);
+  // Shell out to the real pg_dump binary rather than reimplementing a
+  // database export — it already handles every type/constraint/sequence
+  // correctly, which a hand-rolled "SELECT * FROM every table" export
+  // would not (and would silently produce a backup that fails to restore).
+  await execFileAsync('pg_dump', [
+    '-h', process.env.DB_HOST || 'localhost',
+    '-p', process.env.DB_PORT || '5432',
+    '-U', process.env.DB_USER || 'postgres',
+    '-d', process.env.DB_NAME || 'shawalsdeli',
+    '-f', filepath,
+    '--no-owner', '--no-privileges',
+  ], {
+    env: { ...process.env, PGPASSWORD: process.env.DB_PASSWORD || '' },
+    timeout: 5 * 60 * 1000, // 5 minutes — generous for a small-business dataset
+  });
+  return { filepath, stat: fs.statSync(filepath) };
+}
+
 export const createBackup = async (_req: AuthRequest, res: Response): Promise<void> => {
   try {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `shawalsdeli-backup-${timestamp}.sql`;
-    const filepath = path.join(BACKUP_DIR, filename);
+    const { stat } = await runPgDump(filename);
 
-    // Shell out to the real pg_dump binary rather than reimplementing a
-    // database export — it already handles every type/constraint/sequence
-    // correctly, which a hand-rolled "SELECT * FROM every table" export
-    // would not (and would silently produce a backup that fails to restore).
-    await execFileAsync('pg_dump', [
-      '-h', process.env.DB_HOST || 'localhost',
-      '-p', process.env.DB_PORT || '5432',
-      '-U', process.env.DB_USER || 'postgres',
-      '-d', process.env.DB_NAME || 'shawalsdeli',
-      '-f', filepath,
-      '--no-owner', '--no-privileges',
-    ], {
-      env: { ...process.env, PGPASSWORD: process.env.DB_PASSWORD || '' },
-      timeout: 5 * 60 * 1000, // 5 minutes — generous for a small-business dataset
-    });
-
-    const stat = fs.statSync(filepath);
     res.status(201).json({
       success: true,
       message: 'Backup created',
@@ -281,6 +285,133 @@ export const downloadBackup = async (req: AuthRequest, res: Response): Promise<v
 // bigger undertaking). It's honestly partial: only these few event types are
 // covered, not literally everything that happens in the app.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clear All Data — the real "wipe everything" action. Deliberately gated
+// much harder than every other endpoint in this file:
+//
+//   1. The caller's own current password must be re-entered (not just
+//      "is this request authenticated" — proves it's really them, right
+//      now, not a hijacked session or someone who walked up to an
+//      unlocked screen).
+//   2. The exact business name must be typed out, matching what Settings
+//      actually has saved (not a generic "yes" or a checkbox) — this is
+//      the same "type the name to confirm" pattern used by every major
+//      platform for destructive account actions, specifically because a
+//      single click is too cheap an action for a consequence this large.
+//
+// Scope: everything except the caller's own account — every other staff
+// login, the entire menu, and all transactional data (orders, payments,
+// customers, inventory, expenses, purchase orders, loyalty, reservations,
+// schedules, attendance, sick-off requests, audit history). Business
+// *configuration* — the settings table itself (business name, currency,
+// logo, etc.) — is deliberately left alone: that's what makes the business
+// name available to type in step 2 above, and a wiped installation should
+// still know its own name afterward rather than reverting to a blank
+// default. Uploaded files on disk (menu photos, receipts, the logo) are
+// NOT deleted by this — only the database rows referencing them — so
+// there may be orphaned files left in uploads/ afterward; a real "purge
+// unreferenced uploads" pass is a separate, lower-stakes job that doesn't
+// need to be entangled with this one.
+//
+// A full pg_dump safety backup is taken immediately before the wipe,
+// unconditionally, using the exact same mechanism as "Create Backup Now"
+// above — so even a correctly-confirmed, intentional wipe still leaves a
+// way back. If that backup fails, the wipe is aborted; there is no path
+// to "wipe with no safety net."
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Every table in the schema except `users` (handled specially — all rows
+// deleted except the caller's own) and `settings` (business configuration,
+// deliberately preserved — see note above).
+const CLEARABLE_TABLES = [
+  'menu_item_modifiers', 'menu_modifier_options', 'menu_modifiers', 'menu_items', 'menu_categories',
+  'recipe_ingredients', 'menu_stock_transactions', 'inventory_transactions', 'inventory_items', 'suppliers',
+  'purchase_order_items', 'purchase_orders',
+  'loyalty_transactions', 'loyalty_rewards', 'loyalty_points', 'loyalty_tiers',
+  'reservations', 'restaurant_tables',
+  'refunds', 'refund_requests', 'payments', 'order_items', 'held_orders', 'orders',
+  'expenses', 'expense_categories',
+  'customers',
+  'staff_schedules', 'leave_requests', 'staff_attendance', 'sick_off_requests',
+  'notifications', 'push_subscriptions',
+  'password_resets', 'login_otps',
+  'custom_roles',
+  'audit_logs',
+];
+
+export const clearAllData = async (req: AuthRequest, res: Response): Promise<void> => {
+  const { password, confirm_business_name } = req.body as { password?: string; confirm_business_name?: string };
+
+  if (!password) {
+    res.status(400).json({ success: false, message: 'Your current password is required to confirm this.' });
+    return;
+  }
+  if (!confirm_business_name) {
+    res.status(400).json({ success: false, message: 'Type your business name exactly to confirm this.' });
+    return;
+  }
+
+  const userRes = await query('SELECT id, password_hash FROM users WHERE id = $1', [req.user!.id]);
+  if (!userRes.rows.length) { res.status(404).json({ success: false, message: 'Your account could not be found.' }); return; }
+  const passwordOk = await bcrypt.compare(password, userRes.rows[0].password_hash);
+  if (!passwordOk) {
+    res.status(401).json({ success: false, message: 'Incorrect password.' });
+    return;
+  }
+
+  const nameRow = await query(`SELECT value FROM settings WHERE key = 'business_name'`);
+  const actualBusinessName = nameRow.rows[0]?.value || "Shawal's Deli";
+  if (confirm_business_name !== actualBusinessName) {
+    res.status(400).json({ success: false, message: `That doesn't match — type "${actualBusinessName}" exactly to confirm.` });
+    return;
+  }
+
+  // Safety backup first, outside the transaction below and before anything
+  // is touched — if this fails, stop here rather than wiping with no way
+  // back.
+  let backupFilename: string;
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    backupFilename = `shawalsdeli-backup-pre-wipe-${timestamp}.sql`;
+    await runPgDump(backupFilename);
+  } catch (error) {
+    console.error('Pre-wipe safety backup failed — aborting clear-all-data:', error);
+    res.status(500).json({ success: false, message: 'Could not create the safety backup, so nothing was touched. Check that pg_dump is available and try again.' });
+    return;
+  }
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    await client.query(`TRUNCATE ${CLEARABLE_TABLES.join(', ')} CASCADE`);
+    await client.query('DELETE FROM users WHERE id != $1', [req.user!.id]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Clear-all-data failed partway through — rolled back, nothing was lost:', error);
+    res.status(500).json({ success: false, message: `The wipe failed and was rolled back, so no data was lost. A safety backup was still taken first (${backupFilename}). Check server logs for details.` });
+    return;
+  } finally {
+    client.release();
+  }
+
+  // Deliberately after the wipe, not before: audit_logs was just
+  // truncated along with everything else, so this becomes the one entry
+  // that survives — an honest record of the reset itself, not a log of
+  // everything that led up to it.
+  await logAudit(req, {
+    action: 'all_data_cleared',
+    entityType: 'system',
+    details: { safety_backup: backupFilename },
+  });
+
+  res.json({
+    success: true,
+    message: `All data cleared. A safety backup was saved as ${backupFilename} before the wipe, in case you need it back.`,
+    data: { safety_backup: backupFilename },
+  });
+};
 
 export const getRecentActivity = async (_req: Request, res: Response): Promise<void> => {
   try {

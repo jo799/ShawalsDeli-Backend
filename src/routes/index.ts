@@ -17,7 +17,7 @@ import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePu
 import { initiateStkPush, queryStkStatus, mpesaCallback, reconcilePayment } from '../controllers/mpesaController';
 import { createPesapalOrder, getPesapalPaymentStatus, pesapalIpnCallback, cancelPesapalOrder } from '../controllers/pesapalController';
 import { createHeldOrder, getHeldOrders, deleteHeldOrder } from '../controllers/heldOrdersController';
-import { getSettings, updateSettings, uploadLogo, getSystemInfo, getStorageUsage, createBackup, getBackups, downloadBackup, getRecentActivity } from '../controllers/settingsController';
+import { getSettings, updateSettings, uploadLogo, getSystemInfo, getStorageUsage, createBackup, getBackups, downloadBackup, getRecentActivity, clearAllData } from '../controllers/settingsController';
 import { getAuditLogs, getAuditLogActions } from '../controllers/auditLogsController';
 import { getPushConfig, subscribe, unsubscribe } from '../controllers/pushController';
 import { authenticate, authorize } from '../middleware/auth';
@@ -220,6 +220,10 @@ router.get('/settings/recent-activity', authenticate, authorize('administrator',
 router.post('/settings/backup', authenticate, authorize('administrator'), createBackup);
 router.get('/settings/backups', authenticate, authorize('administrator'), getBackups);
 router.get('/settings/backups/:filename', authenticate, authorize('administrator'), downloadBackup);
+// Administrator-only, same as backups above, but a materially bigger risk
+// than anything else on this page — see the extensive comment on
+// clearAllData itself for the confirmation flow this requires.
+router.post('/settings/clear-all-data', authenticate, authorize('administrator'), clearAllData);
 
 // Audit Logs — admin-only, same reasoning as backups: this is visibility
 // into everyone's actions across the whole system, not something a

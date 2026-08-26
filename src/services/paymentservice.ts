@@ -88,21 +88,32 @@ export const applyPaymentToOrder = async (
   const isFullyPaid = newAmountPaid >= total - 0.01;
 
   // Unified status rule — every order type (dine-in, takeaway, delivery)
-  // follows the exact same path: the first payment that clears the
-  // balance releases an order out of 'awaiting_payment' and into 'new',
-  // entering the normal kitchen queue. Food for takeaway/delivery still
-  // has to be cooked — there's no reason paying in full should skip the
-  // kitchen entirely, and Kitchen Display's own "Mark Served" button
-  // already completes any order type once it's actually ready, so that's
-  // the one and only path to 'completed' for every type now, not a
-  // type-specific shortcut here.
+  // follows the same path: the first payment that clears the balance
+  // releases an order out of 'awaiting_payment'. Normally that's into
+  // 'new', entering the kitchen queue — food for takeaway/delivery still
+  // has to be cooked, and Kitchen Display's own "Mark Served" button
+  // completes it once actually ready. The one exception is an order made
+  // entirely of ready-to-eat items (Bhajia, pre-made snacks) — those were
+  // already marked 'served' per-item at creation regardless of this
+  // order's own status, so there's genuinely nothing for the kitchen to
+  // do here either; payment confirming should complete it directly, the
+  // same way a cash/card ready-to-eat order already skips the kitchen
+  // from the moment it's created.
   let newStatus: string = order.status;
+  let completesAsReadyToEat = false;
   if (wasAwaitingPayment && isFullyPaid) {
-    newStatus = 'new';
+    const pendingItemsRes = await client.query(
+      `SELECT COUNT(*) FROM order_items WHERE order_id = $1 AND status != 'served'`,
+      [orderId]
+    );
+    completesAsReadyToEat = parseInt(pendingItemsRes.rows[0].count, 10) === 0;
+    newStatus = completesAsReadyToEat ? 'completed' : 'new';
   }
 
   const updateRes = await client.query(
-    `UPDATE orders SET amount_paid = $1, status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`,
+    completesAsReadyToEat
+      ? `UPDATE orders SET amount_paid = $1, status = $2, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`
+      : `UPDATE orders SET amount_paid = $1, status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`,
     [newAmountPaid, newStatus, orderId]
   );
   const updatedOrder = updateRes.rows[0];

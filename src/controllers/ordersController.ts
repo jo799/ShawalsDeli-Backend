@@ -631,7 +631,9 @@ export const processPayment = async (req: AuthRequest, res: Response): Promise<v
       ...(outcome.stockWarnings.length > 0 ? { stock_warnings: outcome.stockWarnings } : {}),
       message: !outcome.isFullyPaid
         ? `Partial payment recorded. KES ${outcome.balanceRemaining.toFixed(2)} still due.`
-        : 'Payment recorded. Order sent to kitchen.',
+        : outcome.order.status === 'completed'
+          ? 'Payment recorded. Order is ready to serve.'
+          : 'Payment recorded. Order sent to kitchen.',
     });
   } catch (error) {
     await client.query('ROLLBACK');

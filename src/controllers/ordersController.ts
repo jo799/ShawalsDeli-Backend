@@ -1195,3 +1195,55 @@ export const assignOrderToChef = async (req: AuthRequest, res: Response): Promis
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+// DELETE /orders/:id — administrator only.
+//
+// Deliberately requires the order to already be 'cancelled' first, rather
+// than deleting straight from any state — cancelling already does the real
+// work (releases any table, reverses pending payments, etc.), so this is a
+// permanent-cleanup step for something already known to be unwanted, not a
+// shortcut around the normal cancel flow. Genuinely removes the order row
+// from the database: order_items/refunds/refund_requests cascade away with
+// it (ON DELETE CASCADE), while payments are preserved with their order_id
+// set to null rather than deleted too — the schema's deliberate choice to
+// never silently erase a financial record, even when its order is gone.
+export const deleteOrder = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const existing = await query('SELECT id, order_number, status, table_id, total FROM orders WHERE id = $1', [id]);
+    if (!existing.rows.length) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+    const order = existing.rows[0];
+    if (order.status !== 'cancelled') {
+      res.status(400).json({ success: false, message: 'Only a cancelled order can be deleted — cancel it first, then delete it.' });
+      return;
+    }
+
+    // Defensive fallback only — cancellation already releases the table in
+    // the normal flow, this just guards against an inconsistent edge case
+    // rather than leaving a table permanently stuck "occupied" by a row
+    // that's about to stop existing.
+    if (order.table_id) {
+      await query(
+        `UPDATE restaurant_tables SET status = 'available', current_order_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND current_order_id = $2`,
+        [order.table_id, id]
+      );
+    }
+
+    await query('DELETE FROM orders WHERE id = $1', [id]);
+
+    await logAudit(req, {
+      action: 'order_deleted',
+      entityType: 'order',
+      entityId: id,
+      details: { order_number: order.order_number, total: order.total },
+    });
+
+    res.json({ success: true, message: `Order #${order.order_number} permanently deleted.` });
+  } catch (error) {
+    console.error('Delete order error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};

@@ -133,7 +133,7 @@ export const getSummaryReport = async (req: Request, res: Response): Promise<voi
       SELECT payment_method, SUM(amount) as amount, COUNT(*) as count
       FROM payments p
       JOIN orders o ON p.order_id = o.id
-      WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND p.status = 'completed'
+      WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND p.status = 'completed' AND o.status != 'cancelled'
       GROUP BY payment_method
     `, [startDate, endDate]);
 
@@ -395,7 +395,7 @@ export const getOwnerDashboard = async (req: Request, res: Response): Promise<vo
     const cashInRes = await query(`
       SELECT COALESCE(SUM(p.amount), 0) as cash_in
       FROM payments p JOIN orders o ON p.order_id = o.id
-      WHERE DATE(o.created_at) = $1 AND p.status = 'completed' AND p.payment_method != 'points'
+      WHERE DATE(o.created_at) = $1 AND p.status = 'completed' AND p.payment_method != 'points' AND o.status != 'cancelled'
     `, [today]);
     const paidPurchasesRes = await query(`
       SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
@@ -504,7 +504,7 @@ export const getDashboardExport = async (req: Request, res: Response): Promise<v
     const cashInRes = await query(`
       SELECT COALESCE(SUM(p.amount), 0) as cash_in
       FROM payments p JOIN orders o ON p.order_id = o.id
-      WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND p.status = 'completed' AND p.payment_method != 'points'
+      WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND p.status = 'completed' AND p.payment_method != 'points' AND o.status != 'cancelled'
     `, [startDate, endDate]);
     const paidPurchasesRes = await query(`
       SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders

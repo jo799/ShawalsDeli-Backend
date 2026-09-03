@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { login, register, forgotPassword, verifyResetOtp, resetPassword, getProfile, changePassword, verifyLoginOtp, getSystemStatus, setupFirstAdmin } from '../controllers/authController';
-import { getOrders, getOrderById, createOrder, updateOrderStatus, processPayment, cancelPendingPayment, refundOrder, voidOrder, getOrderStats, requestRefund, getRefundRequests, approveRefundRequest, declineRefundRequest, assignOrderToChef } from '../controllers/ordersController';
-import { getMenuItems, getCategories, createCategory, updateCategory, deleteCategory, createMenuItem, updateMenuItem, deleteMenuItem, getRecipe, setRecipe, getMenuItemByBarcode } from '../controllers/menuController';
+import { getOrders, getOrderById, createOrder, updateOrderStatus, processPayment, cancelPendingPayment, refundOrder, voidOrder, getOrderStats, requestRefund, getRefundRequests, approveRefundRequest, declineRefundRequest, assignOrderToChef, deleteOrder } from '../controllers/ordersController';
+import { getMenuItems, getCategories, createCategory, updateCategory, deleteCategory, createMenuItem, updateMenuItem, adjustMenuItemStock, deleteMenuItem, getRecipe, setRecipe, getMenuItemByBarcode } from '../controllers/menuController';
 import { uploadMenuImage } from '../controllers/uploadController';
 import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock, updateInventoryTransactionNotes } from '../controllers/inventoryController';
 import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, redeemPoints, adjustPoints } from '../controllers/customersController';
@@ -17,7 +17,7 @@ import { getPurchaseOrders, getPurchaseOrderById, createPurchaseOrder, receivePu
 import { initiateStkPush, queryStkStatus, mpesaCallback, reconcilePayment } from '../controllers/mpesaController';
 import { createPesapalOrder, getPesapalPaymentStatus, pesapalIpnCallback, cancelPesapalOrder } from '../controllers/pesapalController';
 import { createHeldOrder, getHeldOrders, deleteHeldOrder } from '../controllers/heldOrdersController';
-import { getSettings, updateSettings, uploadLogo, getSystemInfo, getStorageUsage, createBackup, getBackups, downloadBackup, getRecentActivity, clearAllData } from '../controllers/settingsController';
+import { getSettings, updateSettings, uploadLogo, getSystemInfo, getStorageUsage, createBackup, getBackups, downloadBackup, getRecentActivity } from '../controllers/settingsController';
 import { getAuditLogs, getAuditLogActions } from '../controllers/auditLogsController';
 import { getPushConfig, subscribe, unsubscribe } from '../controllers/pushController';
 import { authenticate, authorize } from '../middleware/auth';
@@ -44,6 +44,7 @@ router.get('/orders/stats/active', authenticate, getOrderStats);
 router.get('/orders/:id', authenticate, getOrderById);
 router.post('/orders', authenticate, createOrder);
 router.put('/orders/:id/status', authenticate, updateOrderStatus);
+router.delete('/orders/:id', authenticate, authorize('administrator'), deleteOrder);
 router.post('/orders/:id/payment', authenticate, processPayment);
 router.post('/orders/:id/cancel-payment', authenticate, cancelPendingPayment);
 // Returning money and voiding paid orders directly is an administrator-only
@@ -70,6 +71,7 @@ router.delete('/menu/categories/:id', authenticate, authorize('administrator', '
 router.post('/menu/items', authenticate, authorize('administrator', 'manager'), createMenuItem);
 router.post('/menu/upload', authenticate, authorize('administrator', 'manager'), uploadMenuImage);
 router.put('/menu/items/:id', authenticate, authorize('administrator', 'manager'), updateMenuItem);
+router.put('/menu/items/:id/stock', authenticate, authorize('administrator', 'manager', 'cashier', 'head_chef'), adjustMenuItemStock);
 router.delete('/menu/items/:id', authenticate, authorize('administrator', 'manager'), deleteMenuItem);
 router.get('/menu/items/:id/recipe', authenticate, getRecipe);
 router.get('/menu/items/barcode/:code', authenticate, getMenuItemByBarcode);
@@ -220,10 +222,6 @@ router.get('/settings/recent-activity', authenticate, authorize('administrator',
 router.post('/settings/backup', authenticate, authorize('administrator'), createBackup);
 router.get('/settings/backups', authenticate, authorize('administrator'), getBackups);
 router.get('/settings/backups/:filename', authenticate, authorize('administrator'), downloadBackup);
-// Administrator-only, same as backups above, but a materially bigger risk
-// than anything else on this page — see the extensive comment on
-// clearAllData itself for the confirmation flow this requires.
-router.post('/settings/clear-all-data', authenticate, authorize('administrator'), clearAllData);
 
 // Audit Logs — admin-only, same reasoning as backups: this is visibility
 // into everyone's actions across the whole system, not something a

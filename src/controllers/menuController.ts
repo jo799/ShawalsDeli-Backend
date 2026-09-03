@@ -246,6 +246,56 @@ export const updateMenuItem = async (req: AuthRequest, res: Response): Promise<v
   }
 };
 
+// PUT /menu/items/:id/stock  { stock_quantity }
+//
+// Deliberately separate from the full updateMenuItem above — cashier and
+// head_chef need to correct a count (someone miscounted, stock arrived,
+// items got dropped) without also being able to change a price or rename
+// a dish, which is what granting them the full edit endpoint would do.
+// Only ever touches stock_quantity; every other field is untouched.
+export const adjustMenuItemStock = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { stock_quantity } = req.body;
+
+    const existing = await query('SELECT id, name, track_stock, stock_quantity FROM menu_items WHERE id = $1', [id]);
+    if (!existing.rows.length) {
+      res.status(404).json({ success: false, message: 'Item not found' });
+      return;
+    }
+    const item = existing.rows[0];
+    if (!item.track_stock) {
+      res.status(400).json({ success: false, message: `"${item.name}" doesn't have countable stock tracking turned on — enable it from the full item editor first.` });
+      return;
+    }
+
+    const newQty = Number(stock_quantity);
+    if (!Number.isInteger(newQty) || newQty < 0) {
+      res.status(400).json({ success: false, message: 'stock_quantity must be a whole number, zero or more' });
+      return;
+    }
+    const priorQty = Number(item.stock_quantity);
+
+    const result = await query(
+      `UPDATE menu_items SET stock_quantity = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
+      [newQty, id]
+    );
+
+    if (newQty !== priorQty) {
+      await query(
+        `INSERT INTO menu_stock_transactions (menu_item_id, type, quantity_change, quantity_before, quantity_after, notes, performed_by)
+         VALUES ($1, 'adjustment', $2, $3, $4, $5, $6)`,
+        [id, newQty - priorQty, priorQty, newQty, 'Stock count update', req.user?.id || null]
+      );
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 // Real barcode lookup for POS's Scan feature — matches what a USB barcode
 // scanner types (it behaves as a keyboard, typing the code then Enter, not
 // a camera feed). Case-sensitive exact match; most retail barcodes are

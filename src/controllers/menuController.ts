@@ -137,7 +137,7 @@ export const deleteCategory = async (req: Request, res: Response): Promise<void>
   }
 };
 
-export const createMenuItem = async (req: Request, res: Response): Promise<void> => {
+export const createMenuItem = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { name, description, price, cost, category_id, preparation_time, status, tags, image_url,
             track_stock, stock_quantity, reorder_level, barcode, ready_to_eat } = req.body;
@@ -145,8 +145,15 @@ export const createMenuItem = async (req: Request, res: Response): Promise<void>
       res.status(400).json({ success: false, message: 'name is required' });
       return;
     }
-    const numericPrice = Number(price);
-    if (!Number.isFinite(numericPrice) || numericPrice < 0) {
+    // Cashier and head_chef can add/edit/remove menu items freely, but
+    // pricing decisions stay with admin/manager — enforced here, not just
+    // hidden in the UI, since a client-side restriction alone could be
+    // bypassed by anyone calling the API directly. A new item they create
+    // starts at KES 0 and needs an admin/manager to set its real price
+    // before it's ready to sell.
+    const canSetPrice = ['administrator', 'manager'].includes(req.user!.role);
+    const numericPrice = canSetPrice ? Number(price) : 0;
+    if (canSetPrice && (!Number.isFinite(numericPrice) || numericPrice < 0)) {
       res.status(400).json({ success: false, message: 'price must be a non-negative number' });
       return;
     }
@@ -215,19 +222,33 @@ export const updateMenuItem = async (req: AuthRequest, res: Response): Promise<v
     // lands in the same audit ledger the POS-driven sale/restock deductions
     // use — "why did this number change" should always be answerable from
     // menu_stock_transactions, not just the sale path.
-    const before = await query('SELECT stock_quantity, track_stock FROM menu_items WHERE id = $1', [id]);
+    const before = await query('SELECT stock_quantity, track_stock, price FROM menu_items WHERE id = $1', [id]);
     if (before.rows.length === 0) {
       res.status(404).json({ success: false, message: 'Item not found' });
       return;
     }
     const priorQty = Number(before.rows[0].stock_quantity);
 
+    // Same rule as createMenuItem — cashier/head_chef can edit everything
+    // about an item except its price. Enforced by simply not letting their
+    // submitted price value reach the UPDATE at all; whatever price was
+    // already on the item stays exactly as it was, no matter what they send.
+    const canSetPrice = ['administrator', 'manager'].includes(req.user!.role);
+    const effectivePrice = canSetPrice ? price : before.rows[0].price;
+    if (canSetPrice) {
+      const numericPrice = Number(price);
+      if (!Number.isFinite(numericPrice) || numericPrice < 0) {
+        res.status(400).json({ success: false, message: 'price must be a non-negative number' });
+        return;
+      }
+    }
+
     const result = await query(`
       UPDATE menu_items SET name=$1, description=$2, price=$3, cost=$4, category_id=$5,
         preparation_time=$6, status=$7, tags=$8, image_url=$9,
         track_stock=$10, stock_quantity=$11, reorder_level=$12, barcode=$13, ready_to_eat=$14, updated_at=CURRENT_TIMESTAMP
       WHERE id=$15 RETURNING *
-    `, [name, description, price, cost, category_id || null, preparation_time, status, tags, image_url,
+    `, [name, description, effectivePrice, cost, category_id || null, preparation_time, status, tags, image_url,
         trackStock, stockQty, reorderLvl, trimmedBarcode, ready_to_eat === true, id]);
     if (!result.rows.length) { res.status(404).json({ success: false, message: 'Item not found' }); return; }
 

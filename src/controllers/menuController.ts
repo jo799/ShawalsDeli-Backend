@@ -185,6 +185,14 @@ export const createMenuItem = async (req: AuthRequest, res: Response): Promise<v
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *
     `, [name.toString().trim(), description, numericPrice, cost || 0, category_id || null, preparation_time || 15, status || 'available', tags || [], image_url || null,
         trackStock, stockQty, reorderLvl, trimmedBarcode, ready_to_eat === true]);
+
+    await logAudit(req, {
+      action: 'menu_item_created',
+      entityType: 'menu_item',
+      entityId: result.rows[0].id,
+      details: { name: result.rows[0].name, price: numericPrice, category_id: category_id || null },
+    });
+
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error(error);
@@ -260,6 +268,17 @@ export const updateMenuItem = async (req: AuthRequest, res: Response): Promise<v
       );
     }
 
+    await logAudit(req, {
+      action: 'menu_item_updated',
+      entityType: 'menu_item',
+      entityId: id,
+      details: {
+        name: result.rows[0].name,
+        price_changed: canSetPrice && Number(effectivePrice) !== Number(before.rows[0].price),
+        stock_changed: trackStock && stockQty !== priorQty ? { from: priorQty, to: stockQty } : undefined,
+      },
+    });
+
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error(error);
@@ -308,6 +327,12 @@ export const adjustMenuItemStock = async (req: AuthRequest, res: Response): Prom
          VALUES ($1, 'adjustment', $2, $3, $4, $5, $6)`,
         [id, newQty - priorQty, priorQty, newQty, 'Stock count update', req.user?.id || null]
       );
+      await logAudit(req, {
+        action: 'menu_item_stock_adjusted',
+        entityType: 'menu_item',
+        entityId: id,
+        details: { name: item.name, from: priorQty, to: newQty },
+      });
     }
 
     res.json({ success: true, data: result.rows[0] });

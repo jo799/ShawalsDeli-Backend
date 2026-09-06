@@ -226,8 +226,8 @@ router.get('/settings/backups/:filename', authenticate, authorize('administrator
 // Audit Logs — admin-only, same reasoning as backups: this is visibility
 // into everyone's actions across the whole system, not something a
 // manager-level view should include.
-router.get('/audit-logs', authenticate, authorize('administrator'), getAuditLogs);
-router.get('/audit-logs/actions', authenticate, authorize('administrator'), getAuditLogActions);
+router.get('/audit-logs', authenticate, authorize('administrator', 'manager'), getAuditLogs);
+router.get('/audit-logs/actions', authenticate, authorize('administrator', 'manager'), getAuditLogActions);
 
 // Push notifications — any authenticated user can subscribe/unsubscribe
 // their own device; only kitchen-relevant roles actually get notified (see

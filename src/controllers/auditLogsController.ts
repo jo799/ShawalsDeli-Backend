@@ -1,9 +1,9 @@
 import { Request, Response } from 'express';
 import { query } from '../config/database';
 
-// Admin-only (enforced at the route level) — this is a record of who did
-// what across the whole system, including other admins' actions, so it
-// isn't something managers or staff get a view into.
+// Admin and manager only (enforced at the route level) — this is a record
+// of who did what across the whole system, including other staff's
+// actions, so it stays out of reach for regular staff roles.
 export const getAuditLogs = async (req: Request, res: Response): Promise<void> => {
   try {
     const { action, user_id, start_date, end_date, page = 1, limit = 50 } = req.query;

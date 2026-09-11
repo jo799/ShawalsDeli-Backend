@@ -495,7 +495,7 @@ export const resetPassword = async (req: Request, res: Response): Promise<void> 
 export const getProfile = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const result = await query(
-      'SELECT id, full_name, email, phone, role, status, schedule_type, avatar_url, joined_date, last_login, created_at FROM users WHERE id = $1',
+      'SELECT id, full_name, email, phone, role, status, schedule_type, avatar_url, joined_date, last_login, created_at, permission_overrides FROM users WHERE id = $1',
       [req.user!.id]
     );
     res.json({ success: true, data: result.rows[0] });

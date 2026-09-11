@@ -3,6 +3,7 @@ import { query } from '../config/database';
 import bcrypt from 'bcryptjs';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit } from '../services/auditLog';
+import { PERMISSIONS, expandImpliedPermissions, type Permission } from '../permissions';
 
 const VALID_ROLES = ['administrator', 'manager', 'head_chef', 'cashier', 'waiter', 'kitchen_staff', 'cleaner'];
 const VALID_STATUSES = ['active', 'on_leave', 'inactive'];
@@ -40,7 +41,7 @@ export const getStaff = async (req: Request, res: Response): Promise<void> => {
 
     params.push(Number(limit), offset);
     const result = await query(`
-      SELECT id, full_name, email, phone, role, status, approval_status, schedule_type, avatar_url, joined_date, last_login, created_at, recurring_day_off
+      SELECT id, full_name, email, phone, role, status, approval_status, schedule_type, avatar_url, joined_date, last_login, created_at, recurring_day_off, permission_overrides
       FROM users ${where}
       ORDER BY joined_date DESC
       LIMIT $${idx++} OFFSET $${idx++}
@@ -520,6 +521,59 @@ export const getMyAttendanceToday = async (req: AuthRequest, res: Response): Pro
       [req.user!.id]
     );
     res.json({ success: true, data: result.rows[0] || null });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// PUT /staff/:id/permissions  { permissions: string[] | null }
+//
+// Customizes exactly what ONE person can access, independent of whatever
+// their role would normally grant — for the case where a specific waiter
+// needs one extra capability, or a specific cashier should have one fewer,
+// without inventing a whole new role just for them. Passing null clears
+// the override entirely, reverting this person to their role's normal
+// permissions. Administrator-only: this can grant real access, so it gets
+// the same level of trust as creating a custom role does.
+export const updateStaffPermissions = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { permissions } = req.body;
+
+    const existing = await query('SELECT id, full_name, role FROM users WHERE id = $1', [id]);
+    if (!existing.rows.length) {
+      res.status(404).json({ success: false, message: 'Staff member not found' });
+      return;
+    }
+    const staffMember = existing.rows[0];
+    if (staffMember.role === 'administrator') {
+      res.status(400).json({ success: false, message: 'An administrator always has full access — permissions can\'t be customized for this account.' });
+      return;
+    }
+
+    let normalizedPermissions: Permission[] | null = null;
+    if (permissions !== null) {
+      if (!Array.isArray(permissions) || permissions.some((p: unknown) => typeof p !== 'string' || !(PERMISSIONS as readonly string[]).includes(p))) {
+        res.status(400).json({ success: false, message: 'permissions must be an array of valid permission strings, or null to reset to the role default' });
+        return;
+      }
+      normalizedPermissions = expandImpliedPermissions(permissions as Permission[]);
+    }
+
+    const result = await query(
+      'UPDATE users SET permission_overrides = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING id, full_name, role, permission_overrides',
+      [normalizedPermissions ? JSON.stringify(normalizedPermissions) : null, id]
+    );
+
+    await logAudit(req, {
+      action: normalizedPermissions ? 'staff_permissions_customized' : 'staff_permissions_reset',
+      entityType: 'user',
+      entityId: id,
+      details: { full_name: staffMember.full_name, permissions: normalizedPermissions },
+    });
+
+    res.json({ success: true, data: result.rows[0], message: normalizedPermissions ? `${staffMember.full_name}'s access has been customized.` : `${staffMember.full_name} now uses the standard permissions for their role.` });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });

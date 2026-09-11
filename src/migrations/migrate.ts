@@ -1120,6 +1120,14 @@ const createTables = async () => {
     // kitchen - see order_items.status below.
     await client.query(`ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS ready_to_eat BOOLEAN NOT NULL DEFAULT false`);
 
+    // NULL means "use this person's role permissions as normal" (the
+    // overwhelming majority of staff, forever). A real array means this
+    // exact list of permissions is definitive for this one person,
+    // independent of whatever their role would otherwise grant — an
+    // admin customizing one specific waiter's access without inventing a
+    // whole new role just for them.
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS permission_overrides JSONB`);
+
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');
   } catch (error) {

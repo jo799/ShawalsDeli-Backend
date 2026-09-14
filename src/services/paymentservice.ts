@@ -167,7 +167,7 @@ export const applyPaymentToOrder = async (
       [orderId]
     );
     const earningBasis = Math.max(0, total - Number(pointsTenderRes.rows[0].total) - currentPointsTenderAmount);
-    const points = Math.floor(Math.round(earningBasis * 100) / 10000); // 10000 cents = KES 100 = 1 point (matches typical Kenyan supermarket loyalty rates)
+    const points = Math.floor(Math.round(earningBasis * 100) / 2000); // 2000 cents = KES 20 = 1 point
     if (points > 0) {
       await client.query(
         `INSERT INTO loyalty_points (customer_id, total_points, available_points)

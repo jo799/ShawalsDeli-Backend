@@ -5,7 +5,7 @@ import { getMenuItems, getCategories, createCategory, updateCategory, deleteCate
 import { uploadMenuImage } from '../controllers/uploadController';
 import { getInventory, adjustStock, createInventoryItem, updateInventoryItem, deleteInventoryItem, getInventoryActivity, getLowStock, updateInventoryTransactionNotes } from '../controllers/inventoryController';
 import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, redeemPoints, adjustPoints } from '../controllers/customersController';
-import { getLoyaltyStats, getLoyaltyTiers, updatePointValue } from '../controllers/loyaltyController';
+import { getLoyaltyStats, getLoyaltyTiers } from '../controllers/loyaltyController';
 import { getDailyReport, getSummaryReport, exportFinancialSummary, getOwnerDashboard, getDashboardExport } from '../controllers/reportsController';
 import { exportSalesReport } from '../controllers/salesReportController';
 import { getExpenses, getExpenseStats, createExpense, updateExpense, deleteExpense, getExpenseCategories, createExpenseCategory, uploadExpenseReceipt } from '../controllers/expensesController';
@@ -97,7 +97,6 @@ router.post('/customers/:id/adjust-points', authenticate, authorize('administrat
 router.delete('/customers/:id', authenticate, authorize('administrator', 'manager'), deleteCustomer);
 router.get('/loyalty/stats', authenticate, getLoyaltyStats);
 router.get('/loyalty/tiers', authenticate, getLoyaltyTiers);
-router.put('/loyalty/point-value', authenticate, authorize('administrator', 'manager'), updatePointValue);
 
 // Reports
 router.get('/reports/daily', authenticate, getDailyReport);
@@ -126,7 +125,7 @@ router.delete('/expenses/:id', authenticate, authorize('administrator', 'manager
 router.get('/staff', authenticate, authorize('administrator', 'manager'), getStaff);
 router.get('/roles/custom/:name', authenticate, getRoleByName);
 router.get('/roles/custom', authenticate, authorize('administrator', 'manager'), getCustomRoles);
-router.post('/roles/custom', authenticate, authorize('administrator'), createCustomRole);
+router.post('/roles/custom', authenticate, authorize('administrator', 'manager'), createCustomRole);
 router.put('/roles/custom/:id', authenticate, authorize('administrator'), updateCustomRole);
 router.delete('/roles/custom/:id', authenticate, authorize('administrator'), deleteCustomRole);
 router.post('/staff', authenticate, authorize('administrator', 'manager'), createStaff);

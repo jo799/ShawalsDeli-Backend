@@ -498,12 +498,11 @@ export const processPayment = async (req: AuthRequest, res: Response): Promise<v
     // Points redemption is a payment METHOD, not a discount — the order's
     // subtotal/total (what actually gets reported for tax purposes) never
     // changes. It just contributes toward amount_paid the same way a cash
-    // tender does, except the "amount" is derived from a points count and
-    // the configured KES-per-point rate rather than typed in directly — a
+    // tender does, except the "amount" is derived directly from the points
+    // count (1 point = KES 1, fixed) rather than typed in — a
     // client-supplied amount is never trusted here, only points is.
     let roundedAmount: number;
     let pointsToRedeem = 0;
-    let pointValueKes = 1;
     let customerIdForRedemption: string | null = null;
 
     if (payment_method === 'points') {
@@ -535,9 +534,16 @@ export const processPayment = async (req: AuthRequest, res: Response): Promise<v
         return;
       }
 
-      const settingRes = await client.query(`SELECT value FROM settings WHERE key = 'loyalty_points_value_kes'`);
-      pointValueKes = parseFloat(settingRes.rows[0]?.value) || 1;
-      roundedAmount = Math.round(pointsToRedeem * pointValueKes * 100) / 100;
+      // 1 point = KES 1, always — no configurable "point value" any more.
+      // This used to read a settings row (loyalty_points_value_kes) that
+      // could be (and was) misconfigured to something other than 1 — e.g.
+      // set to 0.2, silently turning a 25-point redemption into KES 5
+      // instead of the KES 25 it should always be. Points are earned at a
+      // fixed 1 point per KES 20 spent (see paymentservice.ts) specifically
+      // so they behave like a straightforward 5% cash-back balance — a
+      // point is worth exactly what it says, with no separate conversion
+      // step to ever drift out of sync with that.
+      roundedAmount = pointsToRedeem;
     } else {
       const numericAmount = Number(amount);
       if (!Number.isFinite(numericAmount) || numericAmount <= 0) {

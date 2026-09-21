@@ -1128,6 +1128,22 @@ const createTables = async () => {
     // whole new role just for them.
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS permission_overrides JSONB`);
 
+    // Root-cause fix for the Dashboard's "Cash Position" figure not
+    // reconciling with the physical cash actually in the till: a purchase
+    // order's `payment_status` ('paid') was already enough to know a cost
+    // had left the business, but nothing recorded HOW it left — cash from
+    // the drawer, a bank transfer, or M-Pesa. Cash Position was treating
+    // every 'paid' PO as if it had drained the physical cash drawer, which
+    // silently understates reported cash on any day a supplier was paid by
+    // bank transfer or M-Pesa instead. `payment_method` (nullable — no
+    // guessing for existing historical POs) closes that gap the same way
+    // expenses.payment_method already does. `paid_at` captures the actual
+    // moment payment_status became 'paid', so a PO settled days after it
+    // was placed is correctly attributed to the day the cash actually
+    // moved, not the PO's order_date.
+    await client.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(30) CHECK (payment_method IN ('cash','mpesa','bank_transfer','card'))`);
+    await client.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP`);
+
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');
   } catch (error) {

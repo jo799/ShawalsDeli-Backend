@@ -327,22 +327,37 @@ export const createSupplier = async (req: AuthRequest, res: Response): Promise<v
   }
 };
 
-// PUT /purchases/:id/payment-status  { payment_status }
+// PUT /purchases/:id/payment-status  { payment_status, payment_method? }
 //
 // The column already existed on purchase_orders and was already displayed
 // in the UI — but nothing anywhere in the app could actually change it
 // from its 'unpaid' default. This is the missing write path: whoever
 // actually pays a supplier invoice records it here. It matters beyond
 // bookkeeping tidiness — cash position reporting specifically needs to
-// know whether a purchase's cost has actually left the business yet, and
-// with no way to ever mark one paid, it never would.
+// know whether a purchase's cost has actually left the business yet.
+//
+// payment_method is required whenever the new status is 'paid' — knowing
+// a PO is paid isn't enough for a physical cash reconciliation; Cash
+// Position needs to know whether that money left the till (cash) or moved
+// through a bank/M-Pesa/card rail that never touched the drawer. paid_at
+// is stamped the moment this transition happens, so a PO settled days
+// after it was placed is attributed to the day the money actually moved,
+// not the PO's original order_date.
 export const updatePurchaseOrderPaymentStatus = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { payment_status } = req.body;
+    const { payment_status, payment_method } = req.body;
     const valid = ['unpaid', 'partial', 'paid'];
     if (!valid.includes(payment_status)) {
       res.status(400).json({ success: false, message: `payment_status must be one of: ${valid.join(', ')}` });
+      return;
+    }
+    const validMethods = ['cash', 'mpesa', 'bank_transfer', 'card'];
+    if (payment_status === 'paid' && !validMethods.includes(payment_method)) {
+      res.status(400).json({
+        success: false,
+        message: `Marking a purchase order as paid requires payment_method to be one of: ${validMethods.join(', ')} (so cash reporting knows whether this left the till).`,
+      });
       return;
     }
 
@@ -352,16 +367,26 @@ export const updatePurchaseOrderPaymentStatus = async (req: AuthRequest, res: Re
       return;
     }
 
-    const result = await query(
-      'UPDATE purchase_orders SET payment_status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
-      [payment_status, id]
-    );
+    const result = payment_status === 'paid'
+      ? await query(
+          `UPDATE purchase_orders SET payment_status = $1, payment_method = $2, paid_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`,
+          [payment_status, payment_method, id]
+        )
+      : await query(
+          `UPDATE purchase_orders SET payment_status = $1, payment_method = NULL, paid_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
+          [payment_status, id]
+        );
 
     await logAudit(req, {
       action: 'purchase_order_payment_status_updated',
       entityType: 'purchase_order',
       entityId: id,
-      details: { po_number: existing.rows[0].po_number, from: existing.rows[0].payment_status, to: payment_status },
+      details: {
+        po_number: existing.rows[0].po_number,
+        from: existing.rows[0].payment_status,
+        to: payment_status,
+        ...(payment_status === 'paid' ? { payment_method } : {}),
+      },
     });
 
     res.json({ success: true, data: result.rows[0], message: `Marked as ${payment_status}` });

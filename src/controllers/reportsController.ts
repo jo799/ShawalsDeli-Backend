@@ -71,6 +71,66 @@ async function computeSummary(startDate: string, endDate: string) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// The single authoritative "how much physical cash actually moved" figure
+// — used by both the live Owner Dashboard (today only) and the Dashboard
+// CSV export (any [startDate, endDate] window), so the two can never drift
+// apart the way the old inline per-endpoint math used to.
+//
+// This used to be computed as "every payment method except points, minus
+// ALL expenses, minus ALL purchase orders marked paid" — which quietly
+// mixed M-Pesa/Till/Card money in with cash on the way in, then subtracted
+// bank-transfer and M-Pesa expenses/purchases as if they'd come out of the
+// physical till. On any day the business's non-cash outflows (a supplier
+// paid by bank transfer, an expense settled via M-Pesa) outweighed the
+// extra non-cash income being wrongly counted as cash, the reported figure
+// came out BELOW the cash actually sitting in the drawer — exactly the
+// kind of gap a physical cash count would catch. It also never subtracted
+// refunds at all, so a partial cash refund (which only reduces
+// orders.amount_paid, not the original payments row) left the reported
+// number too HIGH instead.
+//
+// The real formula only ever looks at money that is, or was, physical
+// cash:
+//   cash sales (payment_method = 'cash', by the DAY THE SALE WAS MADE)
+// − cash refunds (refunds.method = 'cash', by the DAY THE REFUND WAS
+//   ISSUED — a refund of an older sale still takes cash out of TODAY's
+//   drawer, not the original sale's day)
+// − cash expenses (expenses.payment_method = 'cash', by expense_date)
+// − cash-settled purchase orders (purchase_orders.payment_method = 'cash',
+//   by the day payment_status actually became 'paid' — paid_at — not the
+//   PO's original order_date, since a supplier is often paid well after
+//   the order was placed)
+//
+// Purchase orders paid before payment_method existed on this table have
+// no recorded method (NULL) and are correctly excluded here rather than
+// guessed at — the same "don't assume, don't paper over" principle the
+// expenses side already followed.
+async function computeCashPosition(startDate: string, endDate: string): Promise<number> {
+  const cashInRes = await query(`
+    SELECT COALESCE(SUM(p.amount), 0) as total
+    FROM payments p JOIN orders o ON p.order_id = o.id
+    WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND p.status = 'completed' AND p.payment_method = 'cash' AND o.status != 'cancelled'
+  `, [startDate, endDate]);
+  const cashRefundsRes = await query(`
+    SELECT COALESCE(SUM(amount), 0) as total FROM refunds
+    WHERE DATE(created_at) BETWEEN $1 AND $2 AND method = 'cash'
+  `, [startDate, endDate]);
+  const cashExpensesRes = await query(`
+    SELECT COALESCE(SUM(amount), 0) as total FROM expenses
+    WHERE expense_date BETWEEN $1 AND $2 AND payment_method = 'cash'
+  `, [startDate, endDate]);
+  const cashPurchasesRes = await query(`
+    SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
+    WHERE payment_status = 'paid' AND payment_method = 'cash' AND DATE(paid_at) BETWEEN $1 AND $2
+  `, [startDate, endDate]);
+
+  return parseFloat(cashInRes.rows[0].total)
+    - parseFloat(cashRefundsRes.rows[0].total)
+    - parseFloat(cashExpensesRes.rows[0].total)
+    - parseFloat(cashPurchasesRes.rows[0].total);
+}
+
 // Shifts a [startDate, endDate] range back by its own length to get the
 // immediately-preceding period of equal size — a week compares to the week
 // before, a month to the month before, a single day to the day before. This
@@ -245,7 +305,7 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
     const summary = await computeSummary(startDate, endDate);
 
     const purchasesRes = await query(`
-      SELECT po.po_number, po.order_date, po.status, po.total_amount, po.funding_source, s.name as supplier_name
+      SELECT po.po_number, po.order_date, po.status, po.total_amount, po.funding_source, po.payment_status, po.payment_method, s.name as supplier_name
       FROM purchase_orders po
       LEFT JOIN suppliers s ON po.supplier_id = s.id
       WHERE po.order_date BETWEEN $1 AND $2
@@ -331,6 +391,7 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
     poSheet.columns = [
       { header: 'Date', key: 'date', width: 12 }, { header: 'PO Number', key: 'po_number', width: 18 },
       { header: 'Supplier', key: 'supplier', width: 24 }, { header: 'Status', key: 'status', width: 14 },
+      { header: 'Payment Status', key: 'payment_status', width: 14 }, { header: 'Paid Via', key: 'paid_via', width: 14 },
       { header: 'Total (KES)', key: 'total', width: 14 }, { header: 'Funded By', key: 'funded_by', width: 16 },
     ];
     poSheet.getRow(1).font = { bold: true };
@@ -338,7 +399,10 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
     purchasesRes.rows.forEach(p => poSheet.addRow({
       date: new Date(p.order_date).toLocaleDateString('en-KE', { day: '2-digit', month: 'short', year: 'numeric' }),
       po_number: p.po_number, supplier: p.supplier_name || '—',
-      status: (p.status as string).replace('_', ' '), total: Number(p.total_amount),
+      status: (p.status as string).replace('_', ' '),
+      payment_status: (p.payment_status as string)?.replace('_', ' ') || '—',
+      paid_via: p.payment_method ? (p.payment_method as string).replace('_', ' ').toUpperCase() : '—',
+      total: Number(p.total_amount),
       funded_by: p.funding_source === 'owner_personal' ? "Owner's Personal Money" : 'Business Funds',
     }));
     poSheet.getColumn('total').numFmt = '#,##0.00';
@@ -383,25 +447,7 @@ export const getOwnerDashboard = async (req: Request, res: Response): Promise<vo
     const summary = await computeSummary(today, today);
     const foodCostPct = summary.net_sales > 0 ? Math.round((summary.cogs / summary.net_sales) * 100) : 0;
 
-    // Cash position — real money collected today (every payment method
-    // except 'points', which isn't actual cash) minus what actually left
-    // the business today: today's expenses (an expense row IS the paid
-    // record — there's no separate "paid" flag, logging one means it
-    // happened) and any purchase order paid in full today. A partially
-    // paid PO is deliberately excluded rather than guessed at — there's no
-    // amount-paid field on purchase_orders, only a status, so there's no
-    // reliable partial figure to subtract; counting the FULL total for a
-    // partial payment would overstate what actually left the till.
-    const cashInRes = await query(`
-      SELECT COALESCE(SUM(p.amount), 0) as cash_in
-      FROM payments p JOIN orders o ON p.order_id = o.id
-      WHERE DATE(o.created_at) = $1 AND p.status = 'completed' AND p.payment_method != 'points' AND o.status != 'cancelled'
-    `, [today]);
-    const paidPurchasesRes = await query(`
-      SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
-      WHERE order_date = $1 AND payment_status = 'paid'
-    `, [today]);
-    const cashPosition = parseFloat(cashInRes.rows[0].cash_in) - summary.total_expenses - parseFloat(paidPurchasesRes.rows[0].total);
+    const cashPosition = await computeCashPosition(today, today);
 
     // Inventory value — same calculation getInventory's own stats already
     // use, just never read by the Dashboard.
@@ -497,20 +543,10 @@ export const getDashboardExport = async (req: Request, res: Response): Promise<v
     const summary = await computeSummary(startDate, endDate);
     const foodCostPct = summary.net_sales > 0 ? Math.round((summary.cogs / summary.net_sales) * 100) : 0;
 
-    // Same cash-position logic as the live dashboard's today-only version,
-    // widened to the full [startDate, endDate] window instead of a single
-    // day — real cash collected in the period minus what actually left
-    // (expenses, and purchases paid in full) during that same window.
-    const cashInRes = await query(`
-      SELECT COALESCE(SUM(p.amount), 0) as cash_in
-      FROM payments p JOIN orders o ON p.order_id = o.id
-      WHERE DATE(o.created_at) BETWEEN $1 AND $2 AND p.status = 'completed' AND p.payment_method != 'points' AND o.status != 'cancelled'
-    `, [startDate, endDate]);
-    const paidPurchasesRes = await query(`
-      SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders
-      WHERE order_date BETWEEN $1 AND $2 AND payment_status = 'paid'
-    `, [startDate, endDate]);
-    const cashPosition = parseFloat(cashInRes.rows[0].cash_in) - summary.total_expenses - parseFloat(paidPurchasesRes.rows[0].total);
+    // Same authoritative cash-only formula as the live dashboard — see
+    // computeCashPosition above — widened to the full [startDate, endDate]
+    // window instead of a single day.
+    const cashPosition = await computeCashPosition(startDate, endDate);
 
     const purchasesRes = await query(`
       SELECT COALESCE(SUM(total_amount), 0) as total FROM purchase_orders

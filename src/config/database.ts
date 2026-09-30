@@ -59,9 +59,23 @@ pool.on('connect', () => {
   console.log('✅ Database connected');
 });
 
+// This fires for an IDLE client in the pool — one sitting unused, not the
+// one running your current query — most often because the underlying TCP
+// connection got reset (laptop sleep/wake, a local Docker Postgres
+// container pausing, idleTimeoutMillis above recycling a connection).
+// That's routine background noise: `pg`'s Pool already discards the broken
+// client and opens a fresh one the next time a query actually needs one, no
+// action required. Exiting the whole process here (as this used to do) was
+// massive overkill for that — every one of these harmless blips killed the
+// entire server. On localhost (ts-node-dev --respawn) that meant a crash +
+// several-second restart on essentially every idle-connection hiccup, which
+// is exactly what showed up as the app repeatedly going "offline" with a
+// perfectly fine internet connection. A managed Postgres (Railway) sees far
+// fewer of these, which is why it looked fine there. Just log it — a query
+// actually failing for a real reason still surfaces normally through query()
+// or getClient()'s own error path, which callers already handle.
 pool.on('error', (err) => {
-  console.error('❌ Database error:', err);
-  process.exit(-1);
+  console.error('⚠️  Idle database connection error (pool will recover automatically):', err.message);
 });
 
 export const query = async (text: string, params?: unknown[]) => {

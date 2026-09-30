@@ -251,12 +251,22 @@ export const updateMenuItem = async (req: AuthRequest, res: Response): Promise<v
       }
     }
 
+    // cost falls back to 0 like createMenuItem already does (line ~186) —
+    // without it, a request that omits `cost` sends `undefined`, which pg
+    // binds as SQL NULL. A menu item with cost = NULL then poisons
+    // Reports/Dashboard's "Top Profitable Item" query (reportsController.ts):
+    // SUM(oi.quantity * mi.cost) becomes NULL for that item, and Postgres
+    // sorts NULLs FIRST in `ORDER BY profit DESC` by default — so that item
+    // would wrongly show up as the most profitable, ahead of items with real,
+    // positive profit. The Menu page's own edit form always sends a real
+    // number today, so this hasn't been hit through the UI, but nothing
+    // stopped it at the API layer the way price already is validated.
     const result = await query(`
       UPDATE menu_items SET name=$1, description=$2, price=$3, cost=$4, category_id=$5,
         preparation_time=$6, status=$7, tags=$8, image_url=$9,
         track_stock=$10, stock_quantity=$11, reorder_level=$12, barcode=$13, ready_to_eat=$14, updated_at=CURRENT_TIMESTAMP
       WHERE id=$15 RETURNING *
-    `, [name, description, effectivePrice, cost, category_id || null, preparation_time, status, tags, image_url,
+    `, [name, description, effectivePrice, cost ?? 0, category_id || null, preparation_time, status, tags, image_url,
         trackStock, stockQty, reorderLvl, trimmedBarcode, ready_to_eat === true, id]);
     if (!result.rows.length) { res.status(404).json({ success: false, message: 'Item not found' }); return; }
 

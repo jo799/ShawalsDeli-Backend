@@ -47,7 +47,26 @@ app.use(cors({
 }));
 
 // Rate limiting
-app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
+// Health checks are exempt — skip, not just a route registered later,
+// because /api/ here is a prefix match that would otherwise catch
+// /api/health regardless of where its own route handler is declared below.
+// A liveness/heartbeat endpoint that can itself be rate-limited is a trap:
+// the frontend's useOnlineStatus hook polls /api/health every 5s (plus
+// Dashboard's 30s poll, OrdersPage's 30s refund-request poll, and ordinary
+// clicking around during dev — all from one IP on localhost), so normal
+// active testing alone can cross 500 requests/15min. Once that happened,
+// EVERY subsequent health check for the rest of that window also got
+// rate-limited, which the frontend correctly reads as "backend
+// unreachable" — a persistent, self-sustaining "Offline" that only ever
+// cleared when the 15-minute window rolled over. Nothing was actually
+// wrong with the connection; the health check was rate-limiting itself.
+app.use('/api/', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 500,
+  // req.path is relative to this middleware's '/api/' mount point, so a
+  // request to /api/health arrives here as '/health'.
+  skip: (req) => req.path === '/health',
+}));
 
 // Tighter limit on auth endpoints to prevent credential stuffing / brute force.
 // 10 attempts per 15 minutes per IP is generous for a POS (cashiers log in

@@ -79,7 +79,18 @@ export const applyPaymentToOrder = async (
   // refuse rather than silently cap — a caller asking to apply more than is
   // owed is either a stale total or a tampered request, not something to
   // paper over by short-changing the payment record.
-  if (amount - balanceDue > 0.01) {
+  //
+  // This used to compare against 0.01 (one cent) instead of 1 (one KES),
+  // contradicting the comment above it and its own reason for existing.
+  // mpesaController rounds every STK push amount UP to a whole shilling
+  // (Daraja requires an integer) and records that rounded figure as the
+  // payment's amount — so for any order whose balance due wasn't already a
+  // whole shilling (routine with tax-inclusive pricing), the M-Pesa payment
+  // would come back from Safaricom successfully collected, then get
+  // rejected here as "exceeds_balance" purely because of that unavoidable
+  // rounding, leaving a paid-for order stuck in awaiting_payment and the
+  // payment wrongly flagged as needing a manual refund.
+  if (amount - balanceDue > 1) {
     return { found: true, applied: false, reason: 'exceeds_balance', order, balanceRemaining: balanceDue };
   }
 

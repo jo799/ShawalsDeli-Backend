@@ -8,6 +8,15 @@ RUN npm run build
 FROM node:20-alpine AS production
 WORKDIR /app
 ENV NODE_ENV=production
+# settingsController.ts shells out to the real pg_dump binary for "Create
+# Backup Now" and the mandatory pre-wipe backup in "Clear All Data" — but
+# plain node:20-alpine has no PostgreSQL client tools at all, so both
+# features would fail every time in production with "pg_dump: command not
+# found". postgresql16-client matches the postgres:16-alpine server used in
+# docker-compose.yml; pg_dump generally tolerates a client a version or two
+# newer than the server, but matching exactly avoids any version-mismatch
+# surprises.
+RUN apk add --no-cache postgresql16-client
 COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force
 COPY --from=builder /app/dist ./dist

@@ -505,7 +505,7 @@ const createTables = async () => {
         payment_id UUID REFERENCES payments(id) ON DELETE SET NULL,
         amount DECIMAL(10,2) NOT NULL CHECK (amount > 0),
         reason TEXT,
-        method VARCHAR(30) NOT NULL DEFAULT 'cash' CHECK (method IN ('cash','mpesa','card','store_credit')),
+        method VARCHAR(30) NOT NULL DEFAULT 'cash' CHECK (method IN ('cash','mpesa','card','till','store_credit')),
         is_void BOOLEAN NOT NULL DEFAULT false,
         restocked BOOLEAN NOT NULL DEFAULT false,
         points_reversed INTEGER NOT NULL DEFAULT 0,
@@ -1143,6 +1143,14 @@ const createTables = async () => {
     // moved, not the PO's order_date.
     await client.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(30) CHECK (payment_method IN ('cash','mpesa','bank_transfer','card'))`);
     await client.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP`);
+
+    // refunds.method was missing 'till' even though payments.payment_method
+    // has allowed it since the ALTER above — a till-paid order had no valid
+    // refund method that actually matched how the money came in, which is
+    // exactly the kind of mismatch that lets a refund get silently recorded
+    // under the wrong method (see ordersController.processRefund).
+    await client.query(`ALTER TABLE refunds DROP CONSTRAINT IF EXISTS refunds_method_check`);
+    await client.query(`ALTER TABLE refunds ADD CONSTRAINT refunds_method_check CHECK (method IN ('cash','mpesa','card','till','store_credit'))`);
 
     await client.query('COMMIT');
     console.log('✅ All tables created successfully');

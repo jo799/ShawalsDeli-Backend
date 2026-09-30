@@ -708,7 +708,7 @@ interface RefundParams {
   req: AuthRequest;
 }
 
-const REFUND_METHODS = ['cash', 'mpesa', 'card', 'store_credit'];
+const REFUND_METHODS = ['cash', 'mpesa', 'card', 'till', 'store_credit'];
 
 type RefundResult =
   | { ok: false; statusCode: number; message: string }
@@ -767,7 +767,43 @@ const processRefund = async (
       };
     }
 
-    const refundMethod = method && REFUND_METHODS.includes(method) ? method : 'cash';
+    // The refund method drives Cash Position directly (a 'cash' refund is
+    // subtracted from cash-on-hand, others aren't) — so a wrong guess here
+    // silently corrupts the same reconciliation this order's original
+    // payment was correct about. Previously any unrecognized/missing method
+    // fell back to 'cash' unconditionally, which meant an M-Pesa or card
+    // refund issued without the (until now nonexistent) frontend method
+    // picker was always misrecorded as a cash outflow.
+    //
+    // Now: an explicit, valid method is trusted as given (the cashier/admin
+    // is asserting how the money physically went back). Absent that, we
+    // infer from how the order was actually paid — safe only when every
+    // completed payment on the order used the same method, since that's the
+    // one case where there's no real ambiguity. A split-tender order (or one
+    // with no completed non-points payment on record) has no safe default
+    // and must be told explicitly which method to use, rather than guessing
+    // 'cash' and quietly skewing the till count.
+    let refundMethod: string;
+    if (method && REFUND_METHODS.includes(method)) {
+      refundMethod = method;
+    } else {
+      const paidMethodsRes = await client.query(
+        `SELECT DISTINCT payment_method FROM payments WHERE order_id = $1 AND status = 'completed' AND payment_method <> 'points'`,
+        [orderId]
+      );
+      const distinctMethods: string[] = paidMethodsRes.rows.map((r: { payment_method: string }) => r.payment_method);
+      if (distinctMethods.length === 1 && REFUND_METHODS.includes(distinctMethods[0])) {
+        refundMethod = distinctMethods[0];
+      } else {
+        await client.query('ROLLBACK');
+        return {
+          ok: false, statusCode: 400,
+          message: distinctMethods.length > 1
+            ? `This order was paid using more than one method (${distinctMethods.join(', ')}). Specify which method this refund is going out through.`
+            : 'Could not determine how this order was paid. Specify a refund method (cash, mpesa, card, till, or store_credit).',
+        };
+      }
+    }
     const newAmountPaid = Math.round((refundable - requested) * 100) / 100;
     const isFullRefund = newAmountPaid <= 0.01;
 

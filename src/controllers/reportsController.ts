@@ -450,18 +450,20 @@ export const exportFinancialSummary = async (req: Request, res: Response): Promi
 // snapshot of what's on the shelf right now, not a period total.
 export const getOwnerDashboard = async (req: Request, res: Response): Promise<void> => {
   try {
-    // CURRENT_DATE, not new Date().toISOString() — the DB session is
-    // pinned to Africa/Nairobi (see config/database.ts), but
-    // toISOString() always returns the UTC calendar date. For the ~3
-    // hours after midnight Nairobi time (until the UTC day also rolls
-    // over, since Nairobi is UTC+3), that JS computation still returns
-    // YESTERDAY's date — so every "today" figure on this dashboard,
-    // Cash Position included, kept showing yesterday's tail end instead
-    // of resetting to a fresh, empty day. Same fix already applied to
-    // expense_date/joined_date defaults elsewhere (see expensesController,
-    // staffController) — this was the one place it was still missed.
-    const todayRes = await query('SELECT CURRENT_DATE as today');
-    const today = (todayRes.rows[0].today as Date).toISOString().slice(0, 10);
+    // "Today" here has to be the exact same calendar date /reports/daily is
+    // using, since the Dashboard renders figures from both side by side
+    // (Today's Sales from /reports/daily, Cash Position from here) and any
+    // disagreement between them makes one look "stuck" relative to the
+    // other. /reports/daily takes its date from the browser (DashboardPage
+    // computes it locally and passes ?date=), so this endpoint accepts the
+    // same optional ?date= and defers to it when present — falling back to
+    // the DB's own CURRENT_DATE (Africa/Nairobi-pinned, see
+    // config/database.ts) only when no date was supplied, e.g. a direct API
+    // call. CURRENT_DATE, not new Date().toISOString() — toISOString()
+    // always returns the UTC calendar date, which is wrong for ~3 hours
+    // after midnight Nairobi time (until the UTC day also rolls over).
+    const requestedDate = typeof req.query.date === 'string' && DATE_RE.test(req.query.date) ? req.query.date : null;
+    const today = requestedDate ?? (await query('SELECT CURRENT_DATE as today')).rows[0].today.toISOString().slice(0, 10);
     const summary = await computeSummary(today, today);
     const foodCostPct = summary.net_sales > 0 ? Math.round((summary.cogs / summary.net_sales) * 100) : 0;
 

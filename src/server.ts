@@ -62,7 +62,18 @@ app.use(cors({
 // wrong with the connection; the health check was rate-limiting itself.
 app.use('/api/', rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 500,
+  // 500/15min (~33/min) turned out to be too tight for how this app
+  // actually behaves: the Dashboard's 30s auto-refresh poll, the Orders
+  // page's 30s refund-request poll, and ordinary navigation (most pages
+  // fire 5-10 parallel requests on load — auth check, settings, the page's
+  // own data) all draw from the same budget, and on localhost every one of
+  // those comes from a single IP. A single person actively working the app
+  // for 15 minutes was enough to trip it, at which point every request —
+  // not just polling — started getting rejected with 429 until the window
+  // rolled over. 2000/15min (~133/min) gives normal single-restaurant use
+  // (even several tills/tablets on one shared IP at a physical location)
+  // comfortable headroom while still blocking a real flood/abuse pattern.
+  max: 2000,
   // req.path is relative to this middleware's '/api/' mount point, so a
   // request to /api/health arrives here as '/health'.
   skip: (req) => req.path === '/health',

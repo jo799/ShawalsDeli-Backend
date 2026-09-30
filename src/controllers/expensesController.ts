@@ -52,7 +52,13 @@ export const getExpenses = async (req: Request, res: Response): Promise<void> =>
       success: true, data: result.rows,
       summary: { total: parseFloat(countRes.rows[0].total || '0'), count: parseInt(countRes.rows[0].count) },
       by_category: byCategory.rows.map(r => ({ name: r.name, color: r.color, total: parseFloat(r.total) || 0, count: parseInt(r.count) || 0 })),
-      pagination: { total: parseInt(countRes.rows[0].count), page: Number(page), limit: Number(limit) }
+      // pages is required by the Pagination component (it drives the page-
+      // number buttons and disables "next" on the last page) — omitting it
+      // left pagination.pages permanently undefined on the Expenses page,
+      // so no page-number buttons ever rendered and "next" never disabled
+      // even past the last page. ordersController.ts already computes this
+      // correctly; this just matches that.
+      pagination: { total: parseInt(countRes.rows[0].count), page: Number(page), limit: Number(limit), pages: Math.max(1, Math.ceil(parseInt(countRes.rows[0].count) / Number(limit))) }
     });
   } catch (error) {
     console.error(error);

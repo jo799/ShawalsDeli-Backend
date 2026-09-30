@@ -76,9 +76,15 @@ export const getCustomers = async (req: Request, res: Response): Promise<void> =
       };
     }
 
+    // pages drives the Pagination component's page-number buttons and its
+    // "next" disabled state (see ordersController.ts for the correct
+    // pattern) — without it here, both the Customers and Loyalty pages
+    // (both list from /customers) never showed page-number buttons and
+    // never disabled "next" past the last page.
+    const totalCustomers = parseInt(countRes.rows[0].count);
     res.json({
       success: true, data: result.rows,
-      pagination: { total: parseInt(countRes.rows[0].count), page: Number(page), limit: Number(limit) },
+      pagination: { total: totalCustomers, page: Number(page), limit: Number(limit), pages: Math.max(1, Math.ceil(totalCustomers / Number(limit))) },
       ...(growth ? { growth } : {}),
     });
   } catch (error) {

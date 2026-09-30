@@ -54,7 +54,14 @@ export const getPurchaseOrders = async (req: Request, res: Response): Promise<vo
       FROM purchase_orders WHERE DATE_TRUNC('month', order_date) = DATE_TRUNC('month', CURRENT_DATE)
     `);
 
-    res.json({ success: true, data: result.rows, stats: statsRes.rows[0], pagination: { total: parseInt(countRes.rows[0].count), page: Number(page), limit: Number(limit) } });
+    // pages is required by the Pagination component (it drives the page-
+    // number buttons and disables "next" on the last page) — omitting it
+    // left pagination.pages permanently undefined on the Purchases page,
+    // so no page-number buttons ever rendered and "next" never disabled
+    // even past the last page. ordersController.ts already computes this
+    // correctly; this just matches that.
+    const totalCount = parseInt(countRes.rows[0].count);
+    res.json({ success: true, data: result.rows, stats: statsRes.rows[0], pagination: { total: totalCount, page: Number(page), limit: Number(limit), pages: Math.max(1, Math.ceil(totalCount / Number(limit))) } });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });

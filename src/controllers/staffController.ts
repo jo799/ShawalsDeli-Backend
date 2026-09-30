@@ -57,7 +57,10 @@ export const getStaff = async (req: Request, res: Response): Promise<void> => {
       FROM users
     `);
 
-    res.json({ success: true, data: result.rows, stats: statsRes.rows[0], pagination: { total: parseInt(countRes.rows[0].count), page: Number(page), limit: Number(limit) } });
+    // pages drives the Pagination component's page-number buttons and its
+    // "next" disabled state — see ordersController.ts for the pattern.
+    const totalStaff = parseInt(countRes.rows[0].count);
+    res.json({ success: true, data: result.rows, stats: statsRes.rows[0], pagination: { total: totalStaff, page: Number(page), limit: Number(limit), pages: Math.max(1, Math.ceil(totalStaff / Number(limit))) } });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: 'Server error' });
